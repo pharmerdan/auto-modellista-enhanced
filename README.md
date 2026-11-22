@@ -84,14 +84,27 @@ cmake --build build/native-automodellista-enhanced --target ps2run
 ctest --test-dir build/native-automodellista-enhanced --output-on-failure
 ```
 
-Launch the generated PAL build in a window with:
+Launch **Auto Modellista Enhanced** with persistent PS2 memory-card support:
 
-```sh
-"$PWD/build/native-automodellista-enhanced/ps2run" \
-  "$PWD/games/automodellista-pal/disc/SLES_511.91" \
-  --game-dir "$PWD/games/automodellista-pal" \
-  --window
+```bash
+cd ~/Projects/ps2-native-recomp
+
+mkdir -p "$HOME/Library/Application Support/AutoModellistaEnhanced"
+
+./build/native-automodellista-speedometer/ps2run \
+  games/automodellista-pal-ws/patched/SLES_511.91 \
+  --disc games/automodellista-pal-ws/disc.iso \
+  --game-dir games/automodellista-pal-ws \
+  --memcard "$HOME/Library/Application Support/AutoModellistaEnhanced/memcard.ps2" \
+  --window \
+  --no-record
 ```
+
+The game loads saved graphics, CRT, CAS, aspect-ratio and HUD preferences.
+
+**Memory cards:** Always reuse the same memory-card path to preserve progress. In-game memory-card saves are separate from F5/F8 save states.
+
+**Shortcuts:** F10 opens Enhanced settings, F3 shows performance statistics, and F11 toggles fullscreen.
 
 The generated code, extracted executable, disc image, native build, memory card,
 and save states remain local and are ignored by Git. Never commit or distribute
