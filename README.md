@@ -148,3 +148,20 @@ PlayStation and PS2 are trademarks of Sony Interactive Entertainment. *Auto
 Modellista* and other game names are trademarks of their respective owners.
 This project is not affiliated with or endorsed by Sony, Capcom, OpenAI, or any
 other game publisher.
+
+## Screenshots
+
+### Title Screen
+![Title Screen](docs/screenshots/title-screen.png)
+
+### Car Selection
+![Car Selection](docs/screenshots/car-select.png)
+
+### 16:10 Gameplay with CRT Effects
+![16:10 CRT Gameplay](docs/screenshots/gameplay-crt-16-10.png)
+
+### Enhanced Menu — Display
+![Display Settings](docs/screenshots/enhanced-menu-display.png)
+
+### Enhanced Menu — Graphics
+![Graphics Settings](docs/screenshots/enhanced-menu-graphics.png)
