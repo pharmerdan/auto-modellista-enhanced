@@ -12,6 +12,14 @@ struct Blit {
     out_width: u32,
     out_height: u32,
     options: u32,
+    crt_profile: u32,
+    crt_scanline: f32,
+    crt_mask: f32,
+    crt_curvature: f32,
+    crt_brightness: f32,
+    crt_sharpness: f32,
+    image_filter: u32,
+    sharpening: f32,
 }
 
 @group(0) @binding(0) var<storage, read> pixels: array<u32>;
@@ -168,6 +176,51 @@ fn scene_texel(x: i32, y: i32) -> vec3<f32> {
     return c;
 }
 
+// AMD FidelityFX Contrast Adaptive Sharpening (CAS), expressed directly in
+// WGSL from the published FidelityFX CAS algorithm. The soft 3x3 minimum and
+// maximum limit sharpening near black/white and the negative-lobe peak moves
+// from -1/8 to -1/5 across the user range. This stays in the presentation
+// pass: no intermediate texture and no additional full-screen dispatch.
+fn cas_filter(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>, e: vec3<f32>,
+              f: vec3<f32>, g: vec3<f32>, h: vec3<f32>, i: vec3<f32>) -> vec3<f32> {
+    var mn = min(min(min(d, e), min(f, b)), h);
+    var mx = max(max(max(d, e), max(f, b)), h);
+    mn = mn + min(mn, min(min(a, c), min(g, i)));
+    mx = mx + max(mx, max(max(a, c), max(g, i)));
+    let amp = inverseSqrt(clamp(min(mn, vec3<f32>(2.0) - mx) / max(mx, vec3<f32>(0.0001)),
+                                      vec3<f32>(0.0), vec3<f32>(1.0)));
+    let peak = mix(8.0, 5.0, blit.sharpening);
+    let w = -1.0 / (amp * peak);
+    return clamp(((b + d + f + h) * w + e) / (vec3<f32>(1.0) + 4.0 * w),
+                 vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// CAS after the ordinary image scaler, in output-pixel space. This is the
+// CRT-off processing order and is the intended 2x presentation enhancement.
+fn cas_scene(uv: vec2<f32>) -> vec3<f32> {
+    let step = 1.0 / vec2<f32>(f32(blit.out_width), f32(blit.out_height));
+    let a = scene(uv + step * vec2<f32>(-1.0, -1.0));
+    let b = scene(uv + step * vec2<f32>( 0.0, -1.0));
+    let c = scene(uv + step * vec2<f32>( 1.0, -1.0));
+    let d = scene(uv + step * vec2<f32>(-1.0,  0.0));
+    let e = scene(uv);
+    let f = scene(uv + step * vec2<f32>( 1.0,  0.0));
+    let g = scene(uv + step * vec2<f32>(-1.0,  1.0));
+    let h = scene(uv + step * vec2<f32>( 0.0,  1.0));
+    let i = scene(uv + step * vec2<f32>( 1.0,  1.0));
+    return cas_filter(a, b, c, d, e, f, g, h, i);
+}
+
+// CRT reconstruction works in source-pixel space. When CAS and CRT are both
+// enabled, sharpen the source neighbourhood first and let the selected CRT
+// profile reconstruct that result. It is intentionally optional because the
+// combination has more samples than either effect alone.
+fn cas_source_texel(x: i32, y: i32) -> vec3<f32> {
+    return cas_filter(scene_texel(x - 1, y - 1), scene_texel(x, y - 1), scene_texel(x + 1, y - 1),
+                      scene_texel(x - 1, y),     scene_texel(x, y),     scene_texel(x + 1, y),
+                      scene_texel(x - 1, y + 1), scene_texel(x, y + 1), scene_texel(x + 1, y + 1));
+}
+
 fn edge_aa(uv: vec2<f32>, center: vec3<f32>) -> vec3<f32> {
     // Fast approximate edge AA, evaluated in image space. Flat regions return
     // unchanged, while edge direction controls subpixel reconstruction.
@@ -237,11 +290,137 @@ fn reduced_scene(uv: vec2<f32>) -> vec3<f32> {
     return sum / f32(n.x * n.y);
 }
 
+fn cas_reduced_scene(uv: vec2<f32>) -> vec3<f32> {
+    let step = 1.0 / vec2<f32>(f32(blit.out_width), f32(blit.out_height));
+    return cas_filter(reduced_scene(uv + step * vec2<f32>(-1.0, -1.0)),
+                      reduced_scene(uv + step * vec2<f32>( 0.0, -1.0)),
+                      reduced_scene(uv + step * vec2<f32>( 1.0, -1.0)),
+                      reduced_scene(uv + step * vec2<f32>(-1.0,  0.0)),
+                      reduced_scene(uv),
+                      reduced_scene(uv + step * vec2<f32>( 1.0,  0.0)),
+                      reduced_scene(uv + step * vec2<f32>(-1.0,  1.0)),
+                      reduced_scene(uv + step * vec2<f32>( 0.0,  1.0)),
+                      reduced_scene(uv + step * vec2<f32>( 1.0,  1.0)));
+}
+
+// Single-pass presentation ports of Timothy Lottes' public-domain CRT filter
+// and the Hyllian family of scanline filters. They read the renderer's storage
+// image directly, so enabling CRT adds no intermediate full-screen texture.
+fn crt_warp(uv: vec2<f32>) -> vec2<f32> {
+    var p = uv * 2.0 - 1.0;
+    let amount = blit.crt_curvature;
+    p = p * vec2<f32>(1.0 + p.y * p.y * amount * 0.10,
+                      1.0 + p.x * p.x * amount * 0.13);
+    return p * 0.5 + 0.5;
+}
+
+fn crt_fetch(p: vec2<f32>, offset: vec2<i32>) -> vec3<f32> {
+    let size = vec2<f32>(f32(blit.width), f32(blit.height));
+    let at = vec2<i32>(floor(p * size)) + offset;
+    if (at.x < 0 || at.y < 0 || at.x >= i32(blit.width) || at.y >= i32(blit.height)) {
+        return vec3<f32>(0.0);
+    }
+    if (blit.image_filter == 1u) { return cas_source_texel(at.x, at.y); }
+    return scene_texel(at.x, at.y);
+}
+
+fn crt_gauss(distance: f32, hardness: f32) -> f32 {
+    return exp2(hardness * distance * distance);
+}
+
+fn lottes_row3(uv: vec2<f32>, row: i32, hard_pix: f32) -> vec3<f32> {
+    let px = uv * vec2<f32>(f32(blit.width), f32(blit.height));
+    let f = fract(px.x) - 0.5;
+    let a = crt_gauss(f + 1.0, hard_pix);
+    let b = crt_gauss(f, hard_pix);
+    let c = crt_gauss(f - 1.0, hard_pix);
+    return (crt_fetch(uv, vec2<i32>(-1, row)) * a + crt_fetch(uv, vec2<i32>(0, row)) * b +
+            crt_fetch(uv, vec2<i32>(1, row)) * c) / (a + b + c);
+}
+
+fn lottes_row5(uv: vec2<f32>, row: i32, hard_pix: f32) -> vec3<f32> {
+    let px = uv * vec2<f32>(f32(blit.width), f32(blit.height));
+    let f = fract(px.x) - 0.5;
+    var sum = vec3<f32>(0.0);
+    var weight = 0.0;
+    for (var x = -2; x <= 2; x = x + 1) {
+        let w = crt_gauss(f - f32(x), hard_pix);
+        sum = sum + crt_fetch(uv, vec2<i32>(x, row)) * w;
+        weight = weight + w;
+    }
+    return sum / weight;
+}
+
+fn crt_mask(at: vec2<f32>) -> vec3<f32> {
+    let dim = 1.0 - blit.crt_mask * 0.45;
+    let bright = 1.0 + blit.crt_mask * 0.30;
+    let column = u32(floor(at.x)) % 3u;
+    if (column == 0u) { return vec3<f32>(bright, dim, dim); }
+    if (column == 1u) { return vec3<f32>(dim, bright, dim); }
+    return vec3<f32>(dim, dim, bright);
+}
+
+fn crt_lottes(uv_in: vec2<f32>, screen_at: vec2<f32>, fast: bool) -> vec3<f32> {
+    let uv = crt_warp(uv_in);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return vec3<f32>(0.0); }
+    let px = uv * vec2<f32>(f32(blit.width), f32(blit.height));
+    let fy = fract(px.y) - 0.5;
+    let hard_pix = mix(-2.5, -4.5, blit.crt_sharpness);
+    let hard_scan = mix(-4.0, -12.0, blit.crt_scanline);
+    var color: vec3<f32>;
+    if (fast) {
+        let neighbour = select(1, -1, fy < 0.0);
+        let neighbour_distance = select(fy - 1.0, fy + 1.0, fy < 0.0);
+        let a = crt_gauss(fy, hard_scan);
+        let b = crt_gauss(neighbour_distance, hard_scan);
+        color = (lottes_row3(uv, 0, hard_pix) * a + lottes_row3(uv, neighbour, hard_pix) * b) / (a + b);
+    } else {
+        let wa = crt_gauss(fy + 1.0, hard_scan);
+        let wb = crt_gauss(fy, hard_scan);
+        let wc = crt_gauss(fy - 1.0, hard_scan);
+        color = (lottes_row5(uv, -1, hard_pix) * wa + lottes_row5(uv, 0, hard_pix) * wb +
+                 lottes_row5(uv, 1, hard_pix) * wc) / (wa + wb + wc);
+    }
+    return color * crt_mask(screen_at) * blit.crt_brightness;
+}
+
+fn crt_hyllian(uv_in: vec2<f32>, screen_at: vec2<f32>) -> vec3<f32> {
+    let uv = crt_warp(uv_in);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return vec3<f32>(0.0); }
+    let px = uv * vec2<f32>(f32(blit.width), f32(blit.height));
+    let f = fract(px.x) - 0.5;
+    var color = vec3<f32>(0.0);
+    var total = 0.0;
+    let sharp = mix(2.0, 5.0, blit.crt_sharpness);
+    for (var x = -2; x <= 2; x = x + 1) {
+        let d = abs(f - f32(x));
+        let w = exp(-d * d * sharp);
+        color = color + crt_fetch(uv, vec2<i32>(x, 0)) * w;
+        total = total + w;
+    }
+    let scan = mix(1.0, 1.0 - blit.crt_scanline * 0.55,
+                   0.5 - 0.5 * cos(6.2831853 * fract(px.y)));
+    return (color / total) * scan * crt_mask(screen_at) * blit.crt_brightness;
+}
+
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+    if (blit.crt_profile == 1u) {
+        return vec4<f32>(clamp(crt_lottes(in.uv, in.position.xy, true), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+    if (blit.crt_profile == 2u) {
+        return vec4<f32>(clamp(crt_lottes(in.uv, in.position.xy, false), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+    if (blit.crt_profile == 3u) {
+        return vec4<f32>(clamp(crt_hyllian(in.uv, in.position.xy), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
     var c: vec3<f32>;
     if (blit.width > blit.out_width + blit.out_width / 16u || blit.height > blit.out_height + blit.out_height / 16u) {
+        if (blit.image_filter == 1u) { return vec4<f32>(cas_reduced_scene(in.uv), 1.0); }
         return vec4<f32>(clamp(reduced_scene(in.uv), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+    if (blit.image_filter == 1u) {
+        return vec4<f32>(cas_scene(in.uv), 1.0);
     }
     if ((blit.options & 4u) != 0u) {
         c = sharp_scene(in.uv, (blit.options & 1u) != 0u);

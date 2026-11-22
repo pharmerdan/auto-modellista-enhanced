@@ -75,8 +75,9 @@ void parse(const std::string &text, Config &config, std::vector<std::string> &pr
 
 std::string input_name(int input);              // "Left Shift", "Left Mouse"
 std::string default_file_text();                // keys.ini as written on the first start
-std::string card_text(const Config &config);    // the lines of the key card
-// the program's own keys cannot be given to the game: F1, F2, F5, F8, F9, F11
+// The lines of the key card. auto_modellista_pal selects the SLES-51191 driving card; false keeps the generic card for other games.
+std::string card_text(const Config &config, bool auto_modellista_pal = false);
+// the program's own keys cannot be given to the game: F1, F2, F3, F5, F8, F9, F10, F11
 bool is_reserved(int input);
 
 }  // namespace keymap

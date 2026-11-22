@@ -29,6 +29,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <dlfcn.h>
 #include <pthread.h>
@@ -57,6 +58,53 @@
 #endif
 
 namespace ps2 {
+
+namespace {
+std::atomic<bool> g_hud_edges{false};
+std::atomic<int> g_hud_margin{16};
+}
+
+const char *aspect_name(AspectMode mode) {
+    switch (mode) {
+    case AspectMode::Auto: return "auto";
+    case AspectMode::Ratio4x3: return "4:3";
+    case AspectMode::Ratio16x9: return "16:9";
+    case AspectMode::Ratio16x10: return "16:10";
+    case AspectMode::Ratio21x9: return "21:9";
+    case AspectMode::Ratio32x9: return "32:9 (experimental)";
+    }
+    return "4:3";
+}
+
+void resolve_auto_aspect(float ratio) {
+    if (g_options.aspect != AspectMode::Auto) return;
+    g_options.aspect_ratio = std::clamp(ratio, 4.0f / 3.0f, 32.0f / 9.0f);
+    g_options.widescreen = g_options.aspect_ratio > 1.34f;
+}
+
+float display_aspect() { return g_options.aspect_ratio; }
+bool wide_aspect() { return display_aspect() > 1.34f; }
+void set_hud_layout(bool edge_anchored, int margin) {
+    g_hud_margin.store(std::clamp(margin, 0, 64), std::memory_order_relaxed);
+    g_hud_edges.store(edge_anchored, std::memory_order_release);
+}
+bool hud_edge_anchored() { return g_hud_edges.load(std::memory_order_acquire); }
+int hud_edge_margin() { return g_hud_margin.load(std::memory_order_relaxed); }
+bool set_aspect(const std::string &text) {
+    AspectMode mode;
+    float ratio;
+    if (text == "auto") mode = AspectMode::Auto, ratio = 16.0f / 9.0f;
+    else if (text == "4:3" || text == "4x3") mode = AspectMode::Ratio4x3, ratio = 4.0f / 3.0f;
+    else if (text == "16:9" || text == "16x9") mode = AspectMode::Ratio16x9, ratio = 16.0f / 9.0f;
+    else if (text == "16:10" || text == "16x10") mode = AspectMode::Ratio16x10, ratio = 16.0f / 10.0f;
+    else if (text == "21:9" || text == "21x9") mode = AspectMode::Ratio21x9, ratio = 21.0f / 9.0f;
+    else if (text == "32:9" || text == "32x9") mode = AspectMode::Ratio32x9, ratio = 32.0f / 9.0f;
+    else return false;
+    g_options.aspect = mode;
+    g_options.aspect_ratio = ratio;
+    g_options.widescreen = ratio > 1.34f;
+    return true;
+}
 
 Cpu g_cpu;
 Options g_options;
@@ -247,6 +295,17 @@ void apply_patches(bool boot) {
         case 4: st32(p.address, static_cast<std::uint32_t>(p.value)); break;
         default: st64(p.address, p.value); break;
         }
+    }
+    // Auto Modellista PAL (SLES-51191). The published PCSX2 patch replaces
+    // this projection value and the instruction that initializes its runtime
+    // copy. Updating both data locations each frame makes the projection
+    // selectable without rebuilding translated code for every ratio.
+    if (!boot && g_options.program_path.find("SLES_511.91") != std::string::npos) {
+        const float ratio = display_aspect();
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &ratio, sizeof bits);
+        st32(0x0038972cu, bits);
+        st32(0x00511304u, bits);
     }
 }
 

@@ -1,5 +1,7 @@
 #include "gs.hpp"
 
+#include "aspect_2d.hpp"
+#include "hud_layout.hpp"
 #include "gif.hpp"
 #include "queue.hpp"
 #include "raster.hpp"
@@ -65,6 +67,71 @@ constexpr bool cpu_raster() { return true; }
 bool trace_display() {
     static const bool enabled = std::getenv("PS2_TRACE_DISPLAY") != nullptr;
     return enabled;
+}
+
+struct AutoModellista2D {
+    bool frontend = true, sent_corrected = false, have_sent = false;
+    std::uint64_t frame = 0;
+    std::uint32_t world = 0, corrected[7] = {}, projected = 0, shadow_like = 0, full_surface = 0, logged[4] = {};
+};
+
+AutoModellista2D g_am2d;
+
+bool automodellista_2d() {
+    return g_options.pillarbox_2d && wide_aspect() && g_options.program_path.find("SLES_511.91") != std::string::npos;
+}
+
+bool log_2d_draws() {
+    static const std::string value = os::env("PS2_2D_LOG");
+    return value == "draw";
+}
+
+bool log_2d_summary() {
+    static const bool enabled = !os::env("PS2_2D_LOG").empty();
+    return enabled;
+}
+
+bool aspect_control(const char *name) {
+    const std::string value = os::env(name);
+    return value.empty() || (value != "0" && value != "off" && value != "false");
+}
+
+struct AspectControls {
+    bool menu = aspect_control("PS2_2D_MENU");
+    bool hud = aspect_control("PS2_2D_HUD");
+    bool scissor = aspect_control("PS2_2D_SCISSOR");
+};
+
+const AspectControls &aspect_controls() {
+    static const AspectControls controls;
+    return controls;
+}
+
+void aspect_frame_start(std::uint64_t frame) {
+    AutoModellista2D &a = g_am2d;
+    if (!automodellista_2d()) {
+        a = AutoModellista2D{};
+        a.frame = frame;
+        return;
+    }
+    if (a.frame && log_2d_summary()) {
+        std::fprintf(stderr, "[2d] f%llu scene %s world %u projected %u shadow-like %u full-surface %u corrected point %u line %u tri %u sprite %u\n",
+                     static_cast<unsigned long long>(a.frame), a.frontend ? "frontend" : "gameplay", a.world,
+                     a.projected, a.shadow_like, a.full_surface,
+                     a.corrected[0], a.corrected[1] + a.corrected[2], a.corrected[3] + a.corrected[4] + a.corrected[5], a.corrected[6]);
+    }
+    // Scene tracking selects the independent diagnostic controls and labels
+    // logs. It never changes the classification of an individual draw.
+    const bool next_frontend = a.world < 8192;
+    if (a.frame && next_frontend != a.frontend && log_2d_summary())
+        std::fprintf(stderr, "[2d] f%llu transition %s -> %s (world signature count %u)\n",
+                     static_cast<unsigned long long>(frame), a.frontend ? "frontend" : "gameplay",
+                     next_frontend ? "frontend" : "gameplay", a.world);
+    a.frontend = next_frontend;
+    a.frame = frame;
+    a.world = a.projected = a.shadow_like = a.full_surface = 0;
+    std::fill(std::begin(a.corrected), std::end(a.corrected), 0u);
+    std::fill(std::begin(a.logged), std::end(a.logged), 0u);
 }
 // The lines of the picture the video mode displays: DH+1 lines at most, no more than the mode has (PAL 288 a field, NTSC 240; twice
 // that interlaced), and fewer when the game moves the display rectangle down. DY counts lines from the top of the frame and the mode's
@@ -766,9 +833,109 @@ void transfer(const State &s, std::uint64_t dir) {
     if (s.count < needed) return;
     if (draw) {
         if (!trace::g_any || trace::draw(s, needed)) {
-            if (cpu_raster()) raster::draw(s, s.queue, needed);
+            State *drawing = &s;
+            State adjusted;
+            const Vertex *vertices = s.queue;
+            bool corrected = false;
+            if (automodellista_2d()) {
+                std::uint64_t attr = s.prim;
+                if (!(s.prmodecont & 1u)) attr = (s.prim & 7u) | (s.prmode & ~7ull);
+                const Context &context = s.ctx[(attr >> 9) & 1u];
+                const aspect2d::Signature signature{prim, attr, &context, s.queue, needed};
+                const aspect2d::DrawClass draw_class = aspect2d::classify(signature);
+                const bool projected = draw_class == aspect2d::DrawClass::ProjectedGeometry;
+                const bool shadow_like = aspect2d::shadow_like(signature);
+                const hud::Group hud_group = !g_am2d.frontend ? hud::identify(signature) : hud::Group::None;
+                if (projected) ++g_am2d.world, ++g_am2d.projected;
+                if (shadow_like) ++g_am2d.shadow_like;
+                if (draw_class == aspect2d::DrawClass::FullSurface) ++g_am2d.full_surface;
+                const AspectControls &controls = aspect_controls();
+                const bool coordinates_enabled = g_am2d.frontend ? controls.menu : controls.hud;
+                corrected = coordinates_enabled && draw_class == aspect2d::DrawClass::Interface;
+                int hud_shift = 0;
+                if (corrected) {
+                    adjusted = s;
+                    Context &ac = adjusted.ctx[(attr >> 9) & 1u];
+                    const std::uint32_t width = aspect2d::frame_width(ac);
+                    const float factor = (4.0f / 3.0f) / display_aspect();
+                    const std::uint32_t ofx = static_cast<std::uint32_t>(ac.xyoffset & 0xFFFFu);
+                    for (int i = 0; i < needed; ++i) adjusted.queue[i].x = aspect2d::corrected_x(adjusted.queue[i].x, ofx, width, factor);
+                    if (controls.scissor) ac.scissor = aspect2d::corrected_scissor(ac.scissor, width, factor);
+                    if (ps2::hud_edge_anchored() && hud_group != hud::Group::None) {
+                        hud_shift = hud::edge_shift(hud_group, width, factor, ps2::hud_edge_margin());
+                        for (int i = 0; i < needed; ++i) adjusted.queue[i].x = hud::shifted_x(adjusted.queue[i].x, hud_shift);
+                        if (controls.scissor) ac.scissor = hud::shifted_scissor(ac.scissor, width, hud_shift);
+                    }
+                    drawing = &adjusted;
+                    vertices = adjusted.queue;
+                    ++g_am2d.corrected[prim];
+                }
+                // In draw-log mode, record the frontend's drawable primitives,
+                // including the ones the current classifier left on the original
+                // path. Those are precisely the draws needed to diagnose a menu
+                // that bypasses correction; the per-frame cap keeps this targeted.
+                // Positively matched HUD draws bypass the cap so late overlay
+                // draws cannot disappear from the anchor diagnostic.
+                const bool frontend_candidate = prim >= 3 && prim <= 6 &&
+                    draw_class != aspect2d::DrawClass::ProjectedGeometry;
+                const bool suspicious = frontend_candidate || corrected ||
+                    draw_class == aspect2d::DrawClass::FullSurface;
+                const std::uint32_t log_class = static_cast<std::uint32_t>(draw_class);
+                if (log_2d_draws() && suspicious &&
+                    (hud_group != hud::Group::None || g_am2d.logged[log_class]++ < 64)) {
+                    const char *classification = draw_class == aspect2d::DrawClass::Interface ? "interface" :
+                        draw_class == aspect2d::DrawClass::ProjectedGeometry ? "projected" :
+                        draw_class == aspect2d::DrawClass::FullSurface ? "full-surface" : "original";
+                    std::uint32_t xmin = s.queue[0].x, xmax = s.queue[0].x;
+                    std::uint32_t ymin = s.queue[0].y, ymax = s.queue[0].y;
+                    std::uint32_t zmin = s.queue[0].z, zmax = s.queue[0].z;
+                    float qmin = s.queue[0].q, qmax = s.queue[0].q;
+                    for (int i = 1; i < needed; ++i) {
+                        xmin = std::min(xmin, s.queue[i].x), xmax = std::max(xmax, s.queue[i].x);
+                        ymin = std::min(ymin, s.queue[i].y), ymax = std::max(ymax, s.queue[i].y);
+                        zmin = std::min(zmin, s.queue[i].z), zmax = std::max(zmax, s.queue[i].z);
+                        qmin = std::min(qmin, s.queue[i].q), qmax = std::max(qmax, s.queue[i].q);
+                    }
+                    const Context &logged_context = corrected ? adjusted.ctx[(attr >> 9) & 1u] : context;
+                    const int ofx = static_cast<int>(context.xyoffset & 0xFFFFu);
+                    const int ofy = static_cast<int>((context.xyoffset >> 32) & 0xFFFFu);
+                    const char *hud_name = hud_group == hud::Group::LeftRace ? "left" :
+                        hud_group == hud::Group::RightRace ? "right" :
+                        hud_group == hud::Group::Speedometer ? "speedometer" : "none";
+                    const int logged_ofx = static_cast<int>(logged_context.xyoffset & 0xFFFFu);
+                    const double out_x0 = corrected ? (static_cast<int>(adjusted.queue[0].x) - logged_ofx) / 16.0 :
+                        (static_cast<int>(s.queue[0].x) - ofx) / 16.0;
+                    const double out_x1 = corrected ? (static_cast<int>(adjusted.queue[std::min(1, needed - 1)].x) - logged_ofx) / 16.0 :
+                        (static_cast<int>(s.queue[std::min(1, needed - 1)].x) - ofx) / 16.0;
+                    std::fprintf(stderr, "[2d-draw] f%llu prim %u class %s scene %s corrected %u shadow %u tme %u abe %u zmsk %u zte %u ztst %u xy %.1f,%.1f-%.1f,%.1f v %.1f,%.1f %.1f,%.1f %.1f,%.1f z %08X-%08X q %.6g-%.6g fbp %X zbp %X tbp %X hud %s edges %u margin %d shift %+d outx %.1f,%.1f scissor %u,%u-%u,%u -> %llu-%llu\n",
+                                 static_cast<unsigned long long>(g_am2d.frame), prim, classification,
+                                 g_am2d.frontend ? "frontend" : "gameplay", corrected ? 1u : 0u, shadow_like ? 1u : 0u,
+                                 aspect2d::textured(signature) ? 1u : 0u,
+                                 aspect2d::blended(signature) ? 1u : 0u, aspect2d::depth_masked(signature) ? 1u : 0u,
+                                 aspect2d::depth_tested(signature) ? 1u : 0u, static_cast<unsigned>((context.test >> 17) & 3u),
+                                 (static_cast<int>(xmin) - ofx) / 16.0, (static_cast<int>(ymin) - ofy) / 16.0,
+                                 (static_cast<int>(xmax) - ofx) / 16.0, (static_cast<int>(ymax) - ofy) / 16.0,
+                                 (static_cast<int>(s.queue[0].x) - ofx) / 16.0, (static_cast<int>(s.queue[0].y) - ofy) / 16.0,
+                                 (static_cast<int>(s.queue[std::min(1, needed - 1)].x) - ofx) / 16.0, (static_cast<int>(s.queue[std::min(1, needed - 1)].y) - ofy) / 16.0,
+                                 (static_cast<int>(s.queue[std::min(2, needed - 1)].x) - ofx) / 16.0, (static_cast<int>(s.queue[std::min(2, needed - 1)].y) - ofy) / 16.0,
+                                 zmin, zmax, qmin, qmax,
+                                 static_cast<unsigned>(context.frame & 0x1FFu) * 32u, static_cast<unsigned>(context.zbuf & 0x1FFu) * 32u,
+                                 static_cast<unsigned>(context.tex0 & 0x3FFFu),
+                                 hud_name, ps2::hud_edge_anchored() ? 1u : 0u, ps2::hud_edge_margin(), hud_shift, out_x0, out_x1,
+                                 static_cast<unsigned>(context.scissor & 0x7FFu), static_cast<unsigned>((context.scissor >> 32) & 0x7FFu),
+                                 static_cast<unsigned>((context.scissor >> 16) & 0x7FFu), static_cast<unsigned>((context.scissor >> 48) & 0x7FFu),
+                                 static_cast<unsigned long long>(logged_context.scissor & 0x7FFu),
+                                 static_cast<unsigned long long>((logged_context.scissor >> 16) & 0x7FFu));
+                }
+                if (!g_am2d.have_sent || corrected != g_am2d.sent_corrected) {
+                    ++g_setup_generation;
+                    g_am2d.sent_corrected = corrected;
+                    g_am2d.have_sent = true;
+                }
+            }
+            if (cpu_raster()) raster::draw(*drawing, vertices, needed);
 #ifdef PS2_GPU
-            if (gpu_on()) gpu::draw(s, s.queue, needed);
+            if (gpu_on()) gpu::draw(*drawing, vertices, needed);
 #endif
         }
         ++g_primitives;
@@ -1571,6 +1738,7 @@ void vblank(bool start) {
         if (queue::active()) queue::post(queue::kVblank, static_cast<std::uint32_t>(frame_count()), 0, nullptr, 0);
         else {
             trace::frame_start(frame_count());
+            aspect_frame_start(frame_count());
 #ifdef PS2_GPU
             if (gpu_on()) gpu::flush();
 #endif
@@ -1784,6 +1952,7 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
         case queue::kSoftReset: soft_reset(); break;
         case queue::kVblank:
             trace::frame_start(h.arg0);
+            aspect_frame_start(h.arg0);
 #ifdef PS2_GPU
             if (gpu_on()) gpu::flush();
 #endif

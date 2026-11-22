@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../gs.hpp"
+#include "image.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -54,6 +55,7 @@ bool attach_surface(const SurfaceTarget &target);
 void resize_surface(std::uint32_t width, std::uint32_t height);
 bool has_surface();
 bool present(const DisplaySource &src);
+void set_image_settings(const ImageSettings &settings);
 double busy_ms();
 void stats();
 

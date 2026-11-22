@@ -169,7 +169,8 @@ const char *sharp_2d_word(int sharp) {
 std::string with_sharp_2d(const std::string &file_text, int sharp) { return with_line(file_text, "sharp2d", std::string("sharp_2d = ") + sharp_2d_word(sharp)); }
 
 bool is_reserved(int input) {
-    return input == SDL_SCANCODE_F1 || input == SDL_SCANCODE_F2 || input == SDL_SCANCODE_F5 || input == SDL_SCANCODE_F8 || input == SDL_SCANCODE_F9 || input == SDL_SCANCODE_F11;
+    return input == SDL_SCANCODE_F1 || input == SDL_SCANCODE_F2 || input == SDL_SCANCODE_F3 || input == SDL_SCANCODE_F5 || input == SDL_SCANCODE_F8 ||
+           input == SDL_SCANCODE_F9 || input == SDL_SCANCODE_F10 || input == SDL_SCANCODE_F11;
 }
 
 Config defaults() {
@@ -327,7 +328,7 @@ void parse(const std::string &text, Config &config, std::vector<std::string> &pr
             if (!lookup(token, input)) {
                 bad("'" + token + "' is not a key or mouse button, that one is ignored");
             } else if (is_reserved(input)) {
-                bad("'" + token + "' is one of the program's own keys (F1, F2, F5, F8, F9, F11), that one is ignored");
+                bad("'" + token + "' is one of the program's own keys (F1, F2, F3, F5, F8, F9, F10, F11), that one is ignored");
             } else if (std::find(inputs.begin(), inputs.end(), input) == inputs.end()) {
                 inputs.push_back(input);
             }
@@ -362,8 +363,8 @@ std::string default_file_text() {
         "# Keys are written the English way: Space, Enter, Esc, Tab, Left Shift, Left Ctrl, Backspace, Up, Down, A, B, 1, 2, ...\n"
         "# and mean the place on the keyboard, whatever is printed there: on a German keyboard 'Z' is the key labelled Y.\n"
         "# Mouse: Left Mouse, Right Mouse, Middle Mouse, Mouse X1 and Mouse X2 (the two side buttons), Wheel Up, Wheel Down.\n"
-        "# F1, F2, F5, F8, F9 and F11 belong to the program (quick menu, picture look, quick save, quick load, problem report,\n"
-        "# full screen). On some laptops they need the Fn key: Fn + F1 opens the quick menu.\n"
+        "# F1, F2, F3, F5, F8, F9, F10 and F11 belong to the program (quick menu, picture look, performance, quick save/load,\n"
+        "# problem report, enhanced menu and full screen). On some laptops they need the Fn key.\n"
         "# A line that cannot be read is ignored and written to the log (logs folder); the rest still works.\n"
         "\n";
     for (int a = 0; a < ActionCount; ++a) {
@@ -401,7 +402,39 @@ std::string default_file_text() {
     return t;
 }
 
-std::string card_text(const Config &c) {
+std::string card_text(const Config &c, bool auto_modellista_pal) {
+    if (auto_modellista_pal) {
+        std::string t =
+            "RACING CONTROLS\n"
+            "Action | PS2 control | Keyboard\n";
+        const auto line = [&](const char *action, const char *button, int binding) {
+            t += std::string(action) + " | " + button + " | " + list(c, binding) + "\n";
+        };
+        t += "Steering | Left stick / D-pad\n";
+        t += "  Stick U/L/D/R | " + list(c, LeftUp) + " / " + list(c, LeftLeft) + " / " + list(c, LeftDown) + " / " + list(c, LeftRight) + "\n";
+        t += "  D-pad U/L/D/R | " + list(c, DpadUp) + " / " + list(c, DpadLeft) + " / " + list(c, DpadDown) + " / " + list(c, DpadRight) + "\n";
+        line("Accelerate", "Cross", Cross);
+        line("Brake", "Square", Square);
+        line("Handbrake", "Circle", Circle);
+        line("Hazard lights", "Triangle", Triangle);
+        line("Shift up", "R1", R1);
+        line("Shift down", "L1", L1);
+        line("Rear view", "L2", L2);
+        line("Change camera angle", "R2", R2);
+        line("Horn", "L3", L3);
+        line("Pause", "Start", Start);
+        t +=
+            "\nENHANCED SHORTCUTS\n"
+            "F1  Quick menu\n"
+            "F3  Performance statistics\n"
+            "F5  Quick save\n"
+            "F8  Quick load\n"
+            "F9  Report\n"
+            "F10 Enhanced settings\n"
+            "F11 Fullscreen\n";
+        return t;
+    }
+
     std::string t = "The game window must be in front.\n\n";
     const auto line = [&](const std::string &label, const std::string &keys) { t += label + ":  " + keys + "\n"; };
     line("Walk (up, left, down, right)", list(c, LeftUp) + ", " + list(c, LeftLeft) + ", " + list(c, LeftDown) + ", " + list(c, LeftRight));
@@ -424,7 +457,7 @@ std::string card_text(const Config &c) {
     t += "\nF1: the quick menu (save, load, picture look, resolution, full screen, show or change keys, quit)";
     if (!c.inputs[Menu].empty()) t += "; also " + list(c, Menu);
     t += "\nOn a controller: hold Select, then press Start (or press the Guide button)\n";
-    t += "F5 quick save   F8 quick load   F9 something is wrong   F11 full screen\n";
+    t += "F3 performance   F5 quick save   F8 quick load   F9 report   F10 enhanced menu   F11 full screen\n";
     t += "F2 picture look, now: " + std::string(look_name(c.look < 0 ? kDefaultLook : c.look)) + " (sharp + smooth edges, sharp, crisp, crisp + smooth edges, soft, soft + smooth edges)\n";
     t += "On some laptops the F keys need the Fn key held down: Fn + F1 opens the quick menu. The buttons below work without Fn.\n";
     if (!c.inputs[Help].empty()) t += "This card at once: " + list(c, Help) + "\n";

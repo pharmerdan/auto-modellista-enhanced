@@ -14,6 +14,10 @@ namespace quickmenu {
 
 enum class Command {
     none, resume, save, load, look, scale, sharp_2d, fullscreen, keys, quit,
+    aspect, vsync, performance_overlay, restore_defaults,
+    image_filter, sharpening, reset_image,
+    crt_profile, crt_scanline, crt_mask, crt_curvature, crt_brightness, crt_sharpness, reset_crt,
+    hud_mode, hud_margin, reset_hud,
     change_keys,   // the main menu's entry that opens the keys page (the menu switches page by itself)
     key_edit,      // keys page: the highlighted line waits for a key (capturing() is true from now on)
     key_defaults   // keys page: put back the default keys (asked once, like Quit)
@@ -28,6 +32,21 @@ struct Values {
     int sharp_now = 1, sharp_next = 1;  // the 2D art filter (0 soft, 1 sharp, 2 sharpest): this run's, and keys.ini's for the next start
     bool sharp_locked = false;  // PS2_SHARP_2D is set
     bool fullscreen = false;
+    std::string aspect = "4:3";
+    bool aspect_locked = false;
+    bool vsync = true;
+    bool vsync_locked = false;
+    bool vsync_available = false;
+    bool performance_overlay = false;
+    std::string image_filter = "Original";
+    int sharpening = 35;
+    bool image_filter_locked = false, sharpening_locked = false;
+    std::string crt_profile = "Off";
+    int crt_scanline = 65, crt_mask = 35, crt_curvature = 10, crt_brightness = 112, crt_sharpness = 35;
+    bool hud_edge_anchored = false;
+    int hud_margin = 16;
+    std::string presented_fps = "--", frame_time = "--", simulation_fps = "--", game_speed = "--";
+    std::string settings_path;
     // the keys page: one row per button (label and its keys, in the order of keys.ini) and a message line (what the last change did)
     struct KeyRow {
         std::string label, keys;
@@ -46,8 +65,11 @@ class Menu {
 public:
     bool is_open() const { return open_; }
     void open();
+    void open_enhanced();
+    bool enhanced() const { return page_ == Page::enhanced || (page_ == Page::keys && parent_page_ == Page::enhanced); }
     void close() { open_ = false; }
     void move(int delta);                      // up (-1) and down (+1), round at the ends
+    void section_move(int delta);              // enhanced menu: previous/next section
     Command choose();                          // Enter, Cross, a click: what the highlighted entry does (Quit asks once: the first time it only arms itself)
     Command side() const;                      // left and right: the entries that go through values (look, resolution), else none
     bool quit_armed() const { return quit_armed_; }
@@ -62,20 +84,25 @@ public:
     void draw(int window_width, int window_height, const Values &values, Picture &out);
     // A small panel with one line of text at the top of the window (for a few seconds after the menu is closed: "Saved", "Loaded")
     static void draw_note(int window_width, int window_height, const std::string &text, Picture &out);
+    static void draw_performance(int window_width, int window_height, const Values &values, Picture &out);
 
 private:
     bool open_ = false;
     int selected_ = 0;
     bool quit_armed_ = false;  // Quit was chosen once; the next Enter ends the game, anything else takes it back
-    enum class Page { main, keys } page_ = Page::main;
+    enum class Page { main, enhanced, keys } page_ = Page::main, parent_page_ = Page::main;
+    enum class Section { display, graphics, performance, controls, saves, general } section_ = Section::display;
     int main_selected_ = 0;    // the main page's highlight while the keys page is shown
     int key_rows_ = 0, top_ = 0;  // keys page: number of lines, first line shown
     int keys_shown_ = 0;       // lines the last drawing showed
     bool capturing_ = false;
     bool defaults_armed_ = false;  // "Put back the default keys" was chosen once
+    bool settings_defaults_armed_ = false;
+    bool vsync_available_ = false;
     void fit();                // scrolls the keys page so that the highlighted line is shown
     int count() const;         // lines that can be highlighted on the current page
     void draw_keys(int window_width, int window_height, const Values &values, Picture &out);
+    void draw_enhanced(int window_width, int window_height, const Values &values, Picture &out);
     int rows_y_ = 0, footer_y_ = 0;
     // where the last drawing put the entries, for the mouse
     int entry_x_ = 0, entry_y_ = 0, entry_w_ = 0, entry_h_ = 0;

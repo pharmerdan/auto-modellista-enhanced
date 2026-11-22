@@ -37,12 +37,27 @@ struct AxisPress {
     std::uint8_t value;
 };
 
+enum class AspectMode : std::uint8_t { Auto, Ratio4x3, Ratio16x9, Ratio16x10, Ratio21x9, Ratio32x9 };
+
+const char *aspect_name(AspectMode mode);
+bool set_aspect(const std::string &text);
+void resolve_auto_aspect(float ratio);
+float display_aspect();
+bool wide_aspect();
+void set_hud_layout(bool edge_anchored, int margin);
+bool hud_edge_anchored();
+int hud_edge_margin();
+
 struct Options {
     bool trace_syscalls = false;
     bool trace_io = false;
     bool trace_threads = false;
     bool pal = true;
     bool widescreen = false;
+    AspectMode aspect = AspectMode::Ratio4x3;
+    float aspect_ratio = 4.0f / 3.0f;
+    bool pillarbox_2d = false;
+    bool aspect_forced = false;  // command line or PS2_ASPECT; the saved frontend setting cannot replace it
     unsigned language = 0;  // --language: the console's language the game reads (1 English ... 7 Portuguese); 0 leaves PS2_LANGUAGE in charge
     bool rate_forced = false;
     std::uint64_t max_frames = 0;

@@ -378,7 +378,13 @@ int main(int argc, char **argv) {
         const std::string a = argv[i];
         if (a == "--arg" && i + 1 < argc) launch.args.push_back(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) ps2::g_options.max_frames = std::strtoull(argv[++i], nullptr, 10);
-        else if (a == "--widescreen") ps2::g_options.widescreen = true;
+        else if (a == "--widescreen") {
+            ps2::set_aspect("16:9");
+            ps2::g_options.pillarbox_2d = true;
+        }
+        else if (a == "--aspect" && i + 1 < argc) {
+            if (ps2::set_aspect(argv[++i])) ps2::g_options.pillarbox_2d = true;
+        }
         else if (a == "--press" && i + 1 < argc) {
             ps2::Press press;
             if (ps2::parse_press(argv[++i], press)) ps2::g_options.presses.push_back(press);

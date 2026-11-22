@@ -1,5 +1,6 @@
 #include "gpu.hpp"
 #include "hwdraw.hpp"
+#include "image.hpp"
 #include "overlay.hpp"
 #include "setup.hpp"
 #include "tiles.hpp"
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -81,6 +83,8 @@ WGPUAdapter g_adapter = nullptr;
 WGPUSurface g_surface = nullptr;
 WGPUTextureFormat g_surface_format = WGPUTextureFormat_Undefined;
 WGPUPresentMode g_present_mode = WGPUPresentMode_Fifo;
+bool g_vsync_control_available = false;
+std::atomic<std::uint64_t> g_presented_frames{0};
 std::uint32_t g_frame_latency = 0;  // pictures the swap chain may keep in flight; 0 = the library's default (2)
 std::uint32_t g_surface_width = 0, g_surface_height = 0;
 WGPURenderPipeline g_blit = nullptr;
@@ -90,6 +94,9 @@ WGPURenderPipeline g_blit = nullptr;
 WGPURenderPipeline g_blit_ref = nullptr;
 WGPUBindGroup g_blit_group = nullptr;
 WGPUBuffer g_blit_params = nullptr;
+constexpr std::size_t kBlitWords = 16;
+CrtSettings g_crt;
+ImageSettings g_image_settings;
 // The overlay (overlay.hpp): the quick menu's panel, drawn over the game's picture in the present pass with alpha blending. Its pixels
 // sit in a storage buffer like everything else here (no texture: the same code on every backend and in the browser build).
 struct Overlay {
@@ -106,7 +113,6 @@ std::uint32_t g_picture_epoch = 0;  // counts what changes the picture without t
 bool g_have_previous = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 std::uint32_t g_sharp_2d = 1;
-
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
 
 bool g_timestamps = false;
@@ -439,7 +445,7 @@ struct Job {
     WGPUBuffer data = nullptr, params = nullptr;
     bool measure = false, writes = false;  // writes: the job writes the arena, shape and parameter records first
     bool blit = false;                     // and before them present()'s picture parameters
-    std::uint32_t blit_words[8] = {};
+    std::uint32_t blit_words[kBlitWords] = {};
     Arena arena;
     Words shapes;
     std::size_t shape_words = 0;
@@ -456,7 +462,7 @@ State *g_state = nullptr;  // made at the first hand-over and never freed (a det
 void drain();
 WGPUTexture g_present_texture = nullptr;  // present() sets it around submit(view): the texture the job presents and releases
 bool g_presented_async = false;           // the last submit() handed its picture over: the job presents it
-std::uint32_t g_blit[8] = {};             // present()'s picture parameters for the present pass, written by the next submit
+std::uint32_t g_blit[kBlitWords] = {};    // picture and CRT parameters, written by the next submit
 bool g_blit_pending = false;
 // 0 off, 1 everything on the submit thread, 2 the writes stay on the drawing thread. Off by default on Windows and macOS: on a laptop with Intel graphics it frees
 // the drawing thread but costs the emulation thread 1 to 2 ms a frame (two fast cores, now four busy threads), and Silent Hill 2, held by that
@@ -2538,6 +2544,7 @@ void run(Job &j) {
     wgpuDevicePoll(g_device, false, nullptr);
     if (j.view) {
         wgpuSurfacePresent(g_surface);
+        ++g_presented_frames;
         wgpuTextureViewRelease(j.view);
         wgpuTextureRelease(j.texture);
     }
@@ -2684,7 +2691,7 @@ void encode_present(WGPUCommandEncoder enc, WGPUTextureView view, const WGPUPass
     rd.timestampWrites = timestamps;
     WGPURenderPassEncoder rp = wgpuCommandEncoderBeginRenderPass(enc, &rd);
     const float w = static_cast<float>(g_surface_width), h = static_cast<float>(g_surface_height);
-    const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+    const float aspect = display_aspect();
     const float vw = std::min(w, h * aspect), vh = vw / aspect;
     wgpuRenderPassEncoderSetViewport(rp, (w - vw) * 0.5f, (h - vh) * 0.5f, vw, vh, 0.0f, 1.0f);
     wgpuRenderPassEncoderSetPipeline(rp, pipeline ? pipeline : g_blit);
@@ -5040,6 +5047,12 @@ bool attach_surface(const SurfaceTarget &target) {
             break;
         }
     g_present_mode = WGPUPresentMode_Fifo;
+    bool has_fifo = false, has_immediate = false;
+    for (std::size_t i = 0; i < caps.presentModeCount; ++i) {
+        has_fifo |= caps.presentModes[i] == WGPUPresentMode_Fifo;
+        has_immediate |= caps.presentModes[i] == WGPUPresentMode_Immediate;
+    }
+    g_vsync_control_available = has_fifo && has_immediate;
     for (const WGPUPresentMode wanted : {WGPUPresentMode_Immediate, WGPUPresentMode_Mailbox})
         for (std::size_t i = 0; i < caps.presentModeCount; ++i)
             if (caps.presentModes[i] == wanted) g_present_mode = wanted;
@@ -5138,14 +5151,14 @@ bool attach_surface(const SurfaceTarget &target) {
         std::fprintf(stderr, "[gpu] blit check against %s (%zu bytes)%s\n", path.c_str(), ref_text.size(), g_blit_ref ? "" : ": not made");
     }
     wgpuPipelineLayoutRelease(pipeline_layout);
-    g_blit_params = make_buffer(32, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    g_blit_params = make_buffer(kBlitWords * sizeof(std::uint32_t), WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     WGPUBindGroupEntry be[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
     be[0].binding = 0;
     be[0].buffer = g_scratch;
     be[0].size = WGPU_WHOLE_SIZE;
     be[1].binding = 1;
     be[1].buffer = g_blit_params;
-    be[1].size = 32;
+    be[1].size = kBlitWords * sizeof(std::uint32_t);
     WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
     bd.layout = layout;
     bd.entryCount = 2;
@@ -5313,7 +5326,7 @@ void picture_key(const DisplaySource &src, std::uint32_t (&key)[29]) {
     const DisplayOverlay &o = src.overlay;
     const std::uint32_t words[29] = {src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, o.active ? 1u : 0u, o.fbp, o.fbw, o.psm, o.dbx, o.dby,
                                      static_cast<std::uint32_t>(o.x), static_cast<std::uint32_t>(o.y), o.width, o.height, g_surface_width, g_surface_height,
-                                     g_options.widescreen ? 1u : 0u, ps2::video_options(), g_scale, g_overlay.on ? 1u : 0u, g_overlay.x, g_overlay.y, g_overlay.width, g_overlay.height, g_picture_epoch};
+                                     static_cast<std::uint32_t>(display_aspect() * 10000.0f), ps2::video_options(), g_scale, g_overlay.on ? 1u : 0u, g_overlay.x, g_overlay.y, g_overlay.width, g_overlay.height, g_picture_epoch};
     std::memcpy(key, words, sizeof words);
 }
 
@@ -5366,9 +5379,17 @@ bool present(const DisplaySource &src) {
     const std::uint32_t param = display_params(src, current);
     push_display(src, current, param);
     const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
-    const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+    const float aspect = display_aspect();
     const float vw = std::min(sw, sh * aspect), vh = vw / aspect;
-    const std::uint32_t blit[8] = {src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u, static_cast<std::uint32_t>(vw), static_cast<std::uint32_t>(vh), ps2::video_options()};
+    const CrtSettings crt = sanitize(g_crt);
+    const ImageSettings image = sanitize(g_image_settings);
+    const std::uint32_t blit[kBlitWords] = {
+        src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u,
+        static_cast<std::uint32_t>(vw), static_cast<std::uint32_t>(vh), ps2::video_options(),
+        static_cast<std::uint32_t>(crt.profile), std::bit_cast<std::uint32_t>(crt.scanline),
+        std::bit_cast<std::uint32_t>(crt.mask), std::bit_cast<std::uint32_t>(crt.curvature),
+        std::bit_cast<std::uint32_t>(crt.brightness), std::bit_cast<std::uint32_t>(crt.sharpness),
+        static_cast<std::uint32_t>(image.filter), std::bit_cast<std::uint32_t>(image.sharpening)};
     post::drain();  // the last picture is presented before this one's acquire
     std::memcpy(post::g_blit, blit, sizeof blit);  // written by the next submit (its job with the submit thread), before the frame's other writes
     post::g_blit_pending = true;
@@ -5412,6 +5433,7 @@ bool present(const DisplaySource &src) {
         {
             wt::Scope s(wt::kPresent);
             wgpuSurfacePresent(g_surface);
+            ++g_presented_frames;
         }
 #endif
         ps2::hitch::enter_present_stage(nullptr);
@@ -5564,7 +5586,7 @@ bool present_again() {
     // the same picture as the last present (its fields are still in the scratch buffer: the game draws nothing while it waits), with the
     // window's size and the picture look of now
     const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
-    const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+    const float aspect = display_aspect();
     const float vw = std::min(sw, sh * aspect), vh = vw / aspect;
     const std::uint32_t tail[3] = {static_cast<std::uint32_t>(vw), static_cast<std::uint32_t>(vh), ps2::video_options()};
     wgpuQueueWriteBuffer(g_queue, g_blit_params, 20, tail, sizeof tail);
@@ -5579,10 +5601,38 @@ bool present_again() {
     submit(target);
 #ifndef __EMSCRIPTEN__
     wgpuSurfacePresent(g_surface);
+    ++g_presented_frames;
 #endif
     wgpuTextureViewRelease(target);
     wgpuTextureRelease(st.texture);
     return true;
+}
+
+std::uint64_t presented_frames() { return g_presented_frames.load(std::memory_order_relaxed); }
+bool vsync_control_available() { return g_vsync_control_available; }
+
+void set_crt_settings(const CrtSettings &settings) {
+    post::drain();
+    g_crt = sanitize(settings);
+    if (g_blit_params) {
+        const std::uint32_t words[6] = {
+            static_cast<std::uint32_t>(g_crt.profile), std::bit_cast<std::uint32_t>(g_crt.scanline),
+            std::bit_cast<std::uint32_t>(g_crt.mask), std::bit_cast<std::uint32_t>(g_crt.curvature),
+            std::bit_cast<std::uint32_t>(g_crt.brightness), std::bit_cast<std::uint32_t>(g_crt.sharpness)};
+        wgpuQueueWriteBuffer(g_queue, g_blit_params, 8 * sizeof(std::uint32_t), words, sizeof words);
+    }
+    ++g_picture_epoch;
+}
+
+void set_image_settings(const ImageSettings &settings) {
+    post::drain();
+    g_image_settings = sanitize(settings);
+    if (g_blit_params) {
+        const std::uint32_t words[2] = {
+            static_cast<std::uint32_t>(g_image_settings.filter), std::bit_cast<std::uint32_t>(g_image_settings.sharpening)};
+        wgpuQueueWriteBuffer(g_queue, g_blit_params, 14 * sizeof(std::uint32_t), words, sizeof words);
+    }
+    ++g_picture_epoch;
 }
 
 double busy_ms() {

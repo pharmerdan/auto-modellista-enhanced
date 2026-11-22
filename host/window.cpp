@@ -47,9 +47,11 @@
 
 #include "keymap.hpp"
 #include "quickmenu.hpp"
+#include "enhanced_settings.hpp"
 #include "ps2/crash.hpp"
 #include "ps2/hitch.hpp"
 #include "ps2/os.hpp"
+#include "ps2/pace.hpp"
 #include "ps2/video.hpp"
 #include "stretch.hpp"
 #ifdef PS2_GPU
@@ -158,11 +160,18 @@ bool g_scale_locked = false;  // PS2_SCALE was set before the start: keys.ini do
 // The filter of upscaled 2D art (PS2_SHARP_2D: 0 soft, 1 sharp, 2 sharpest), the same way: this run's and keys.ini's for the next start.
 int g_sharp_now = 1, g_sharp_next = 1;
 bool g_sharp_locked = false;
+int g_image_filter = 0;
+float g_sharpening = 0.35f;
+bool g_image_filter_locked = false, g_sharpening_locked = false;
+bool g_vsync_locked = false;
 // A short note drawn over the picture for a moment after the menu is closed ("Saved", "Loaded"): the menu asked for a quick save or load
 bool g_note_wanted = false;  // a save or load was asked by the menu: the next message about it is shown over the picture
 std::string g_note_text;  // not empty while the note is up
 Uint32 g_note_until = 0;
 bool g_overlay_on = false;  // g_menu_picture is laid over the game's picture (the menu, or the note)
+bool g_performance_overlay = false;
+std::atomic<std::uint64_t> g_sdl_presented{0};
+double g_presented_fps = 0.0, g_frame_time_ms = 0.0, g_simulation_fps = 0.0, g_game_speed = 0.0;
 std::uint64_t g_script_extra = 0;  // the pad script's clock goes on while the menu is open (the game's frames stand still)
 
 void refresh_title() {
@@ -517,7 +526,7 @@ void load_keys() {
     if (have) keymap::parse(text, config, problems);
     for (const std::string &p : problems) std::fprintf(stderr, "[keys] %s, %s\n", g_keys_path.c_str(), p.c_str());
     g_keys = config;
-    if (!g_look_forced && config.look >= 0) g_look = config.look;
+    if (!g_look_forced) g_look = std::clamp(enhanced::settings().look, 0, keymap::kLookCount - 1);
     g_keys.look = g_look;
     ps2::set_video_options(static_cast<std::uint32_t>(g_look));
     remember_keys_time();
@@ -604,7 +613,8 @@ void show_key_card(const char *why) {
     if (g_card.state.load(std::memory_order_acquire) != 0) return;  // one box at a time
 #endif
     reload_keys_if_changed();
-    g_card.text = keymap::card_text(g_keys);
+    const bool auto_modellista_pal = ps2::pace::serial_of(ps2::g_options.program_path) == "SLES-51191";
+    g_card.text = keymap::card_text(g_keys, auto_modellista_pal);
     if (!g_keys_path.empty())
         g_card.text += "\nTo change keys: \"Change keys\" in the quick menu, or edit this file (the game reads it again when you come back):\n" + g_keys_path + "\n";
     if (g_notice_text == kStartNotice) {
@@ -870,6 +880,8 @@ void cycle_look(int step = 1) {
     refresh_title();
     std::fprintf(stderr, "[video] picture look %d: %s\n", g_look, keymap::look_name(g_look));
     if (g_look_forced) return;
+    enhanced::settings().look = g_look;
+    enhanced::save();
     rewrite_keys_file([](const std::string &t) { return keymap::with_look(t, g_look); }, "look");
 }
 
@@ -878,6 +890,8 @@ void cycle_look(int step = 1) {
 void toggle_fullscreen() {
     const bool full = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
     SDL_SetWindowFullscreen(g_window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+    enhanced::settings().fullscreen = !full;
+    enhanced::save();
 }
 
 void window_pixels(int &w, int &h) {
@@ -889,7 +903,7 @@ void window_pixels(int &w, int &h) {
 // Makes the panel (the menu, or the note after it) for the window's size and hands it to the one who draws (or takes it away).
 void menu_paint(bool show_again = true) {
     if (show_again) g_menu_redraw = true;
-    g_overlay_on = g_menu.is_open() || !g_note_text.empty();
+    g_overlay_on = g_menu.is_open() || !g_note_text.empty() || g_performance_overlay;
     if (!g_overlay_on) {
 #ifdef PS2_GPU
         if (g_gpu_present) ps2::gs::gpu::set_overlay(nullptr, 0, 0, 0, 0);
@@ -898,23 +912,53 @@ void menu_paint(bool show_again = true) {
     }
     int w = 0, h = 0;
     window_pixels(w, h);
+    quickmenu::Values v;
+    v.look = keymap::look_name(g_look);
+    v.scale_now = g_scale_now;
+    v.scale_next = g_scale_next;
+    v.scale_locked = g_scale_locked;
+    v.sharp_now = g_sharp_now;
+    v.sharp_next = g_sharp_next;
+    v.sharp_locked = g_sharp_locked;
+    v.fullscreen = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
+    v.aspect = ps2::aspect_name(ps2::g_options.aspect);
+    if (ps2::g_options.aspect == ps2::AspectMode::Ratio32x9) v.aspect = "32:9 experimental";
+    v.aspect_locked = ps2::g_options.aspect_forced;
+    v.vsync = enhanced::settings().vsync;
+    v.vsync_locked = g_vsync_locked;
+#ifdef PS2_GPU
+    v.vsync_available = g_gpu_present && ps2::gs::gpu::vsync_control_available();
+#endif
+    v.performance_overlay = g_performance_overlay;
+    v.image_filter = ps2::gs::gpu::image_filter_name(static_cast<ps2::gs::gpu::ImageFilter>(g_image_filter));
+    v.sharpening = static_cast<int>(g_sharpening * 100.0f + 0.5f);
+    v.image_filter_locked = g_image_filter_locked;
+    v.sharpening_locked = g_sharpening_locked;
+    const enhanced::Settings &saved = enhanced::settings();
+    v.crt_profile = ps2::gs::gpu::crt_profile_name(static_cast<ps2::gs::gpu::CrtProfile>(saved.crt_profile));
+    v.crt_scanline = static_cast<int>(saved.crt_scanline * 100.0f + 0.5f);
+    v.crt_mask = static_cast<int>(saved.crt_mask * 100.0f + 0.5f);
+    v.crt_curvature = static_cast<int>(saved.crt_curvature * 100.0f + 0.5f);
+    v.crt_brightness = static_cast<int>(saved.crt_brightness * 100.0f + 0.5f);
+    v.crt_sharpness = static_cast<int>(saved.crt_sharpness * 100.0f + 0.5f);
+    v.hud_edge_anchored = saved.hud_edge_anchored;
+    v.hud_margin = saved.hud_margin;
+    char number[32];
+    std::snprintf(number, sizeof number, "%.1f", g_presented_fps); v.presented_fps = number;
+    std::snprintf(number, sizeof number, "%.2f", g_frame_time_ms); v.frame_time = number;
+    std::snprintf(number, sizeof number, "%.1f", g_simulation_fps); v.simulation_fps = number;
+    std::snprintf(number, sizeof number, "%.0f%%", g_game_speed * 100.0); v.game_speed = number;
+    v.settings_path = enhanced::settings_path();
     if (g_menu.is_open()) {
-        quickmenu::Values v;
-        v.look = keymap::look_name(g_look);
-        v.scale_now = g_scale_now;
-        v.scale_next = g_scale_next;
-        v.scale_locked = g_scale_locked;
-        v.sharp_now = g_sharp_now;
-        v.sharp_next = g_sharp_next;
-        v.sharp_locked = g_sharp_locked;
-        v.fullscreen = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
         if (g_menu.on_keys_page()) {
             for (int a = 0; a < keymap::kChangeableCount; ++a) v.key_rows.push_back({keymap::action_label(a), keymap::keys_text(g_keys, a)});
             v.key_note = g_key_note;
         }
         g_menu.draw(w, h, v, g_menu_picture);
-    } else {
+    } else if (!g_note_text.empty()) {
         quickmenu::Menu::draw_note(w, h, g_note_text, g_menu_picture);
+    } else {
+        quickmenu::Menu::draw_performance(w, h, v, g_menu_picture);
     }
     const quickmenu::Picture &p = g_menu_picture;
 #ifdef PS2_GPU
@@ -961,14 +1005,16 @@ void menu_show_again() {
     SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
     draw_menu_sdl();
     SDL_RenderPresent(g_renderer);
+    ++g_sdl_presented;
 }
 
-void open_menu(const char *why) {
+void open_menu(const char *why, bool enhanced_menu = false) {
     if (g_menu.is_open()) return;
     reload_keys_if_changed();
     g_note_text.clear();
     g_key_note.clear();
-    g_menu.open();
+    if (enhanced_menu) g_menu.open_enhanced();
+    else g_menu.open();
     g_menu.set_key_rows(keymap::kChangeableCount);
     g_menu_hold.store(true, std::memory_order_release);
     g_menu_opened_ticks = SDL_GetTicks();
@@ -978,7 +1024,7 @@ void open_menu(const char *why) {
         g_notice_text.clear();
         refresh_title();
     }
-    std::fprintf(stderr, "[menu] the quick menu opens (%s) at frame %llu; the game waits\n", why, static_cast<unsigned long long>(ps2::frames_run()));
+    std::fprintf(stderr, "[menu] the %s menu opens (%s) at frame %llu; the game waits\n", enhanced_menu ? "enhanced" : "quick", why, static_cast<unsigned long long>(ps2::frames_run()));
     menu_paint();
 }
 
@@ -1069,6 +1115,20 @@ bool capture_event(const SDL_Event &e) {
 // what an entry does; step is -1 or 1 for left and right (Enter and a click go forward)
 void menu_command(quickmenu::Command c, int step) {
     using quickmenu::Command;
+    const auto apply_crt = [] {
+#ifdef PS2_GPU
+        const enhanced::Settings &s = enhanced::settings();
+        if (g_gpu_present) ps2::gs::gpu::set_crt_settings({static_cast<ps2::gs::gpu::CrtProfile>(s.crt_profile), s.crt_scanline, s.crt_mask,
+                                                           s.crt_curvature, s.crt_brightness, s.crt_sharpness});
+#endif
+        enhanced::save();
+    };
+    const auto apply_image = [] {
+#ifdef PS2_GPU
+        if (g_gpu_present) ps2::gs::gpu::set_image_settings({static_cast<ps2::gs::gpu::ImageFilter>(g_image_filter), g_sharpening});
+#endif
+        enhanced::save();
+    };
     switch (c) {
     case Command::none: menu_paint(); return;  // (Quit asked once: the entry shows the question)
     case Command::resume: close_menu("Resume"); return;
@@ -1083,6 +1143,26 @@ void menu_command(quickmenu::Command c, int step) {
         ps2::quick_request(ps2::QuickKey::load);
         return;
     case Command::look: cycle_look(step); break;
+    case Command::aspect: {
+        if (ps2::g_options.aspect_forced) {
+            set_notice("Aspect ratio is set by the command line or PS2_ASPECT");
+            break;
+        }
+        constexpr const char *modes[] = {"auto", "4:3", "16:9", "16:10", "21:9", "32:9"};
+        int mode = static_cast<int>(ps2::g_options.aspect);
+        mode = (mode + step + 6) % 6;
+        ps2::set_aspect(modes[mode]);
+        if (ps2::g_options.aspect == ps2::AspectMode::Auto) {
+            int ww = 0, wh = 0;
+            SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
+            if (wh > 0) ps2::resolve_auto_aspect(static_cast<float>(ww) / static_cast<float>(wh));
+        }
+        if (g_renderer && g_tex_w) SDL_RenderSetLogicalSize(g_renderer, static_cast<int>(g_tex_w), static_cast<int>(static_cast<float>(g_tex_w) / ps2::display_aspect()));
+        enhanced::settings().aspect = modes[mode];
+        enhanced::save();
+        set_notice(std::string("Aspect ratio: ") + ps2::aspect_name(ps2::g_options.aspect));
+        break;
+    }
     case Command::scale:
         if (g_scale_locked) {
             set_notice("The resolution is set by PS2_SCALE; remove it to choose here");
@@ -1090,6 +1170,8 @@ void menu_command(quickmenu::Command c, int step) {
         }
         g_scale_next = (g_scale_next - 1 + step + 4) % 4 + 1;
         g_keys.scale = g_scale_next;
+        enhanced::settings().scale = g_scale_next;
+        enhanced::save();
         rewrite_keys_file([](const std::string &t) { return keymap::with_scale(t, g_scale_next); }, "resolution");
         set_notice("Resolution " + std::to_string(g_scale_next) + "x" + (g_scale_next == g_scale_now ? "" : ": used when the game starts the next time"));
         std::fprintf(stderr, "[menu] resolution %dx for the next start (this run: %dx)\n", g_scale_next, g_scale_now);
@@ -1101,11 +1183,132 @@ void menu_command(quickmenu::Command c, int step) {
         }
         g_sharp_next = (g_sharp_next + step + 3) % 3;
         g_keys.sharp_2d = g_sharp_next;
+        enhanced::settings().sharp_2d = g_sharp_next;
+        enhanced::save();
         rewrite_keys_file([](const std::string &t) { return keymap::with_sharp_2d(t, g_sharp_next); }, "2D art filter");
         set_notice(std::string("Text and menus: ") + keymap::sharp_2d_word(g_sharp_next) + (g_sharp_next == g_sharp_now ? "" : ", used when the game starts the next time"));
         std::fprintf(stderr, "[menu] 2D art %s for the next start (this run: %s)\n", keymap::sharp_2d_word(g_sharp_next), keymap::sharp_2d_word(g_sharp_now));
         break;
     case Command::fullscreen: toggle_fullscreen(); break;
+    case Command::vsync:
+        if (g_vsync_locked) {
+            set_notice("VSync is set by PS2_PRESENT_MODE");
+            break;
+        }
+        enhanced::settings().vsync = !enhanced::settings().vsync;
+        enhanced::save();
+        set_notice(std::string("VSync ") + (enhanced::settings().vsync ? "on" : "off") + ": used at the next start");
+        break;
+    case Command::performance_overlay:
+        g_performance_overlay = !g_performance_overlay;
+        enhanced::settings().performance_overlay = g_performance_overlay;
+        enhanced::save();
+        break;
+    case Command::image_filter:
+        if (g_image_filter_locked) {
+            set_notice("Image filtering is set by the command line or PS2_IMAGE_FILTER");
+            break;
+        }
+        g_image_filter = (g_image_filter + step + 2) % 2;
+        enhanced::settings().image_filter = g_image_filter;
+        apply_image();
+        break;
+    case Command::sharpening:
+        if (g_sharpening_locked) {
+            set_notice("Sharpening is set by the command line or PS2_SHARPENING");
+            break;
+        }
+        g_sharpening = std::clamp(g_sharpening + step * 0.05f, 0.0f, 1.0f);
+        enhanced::settings().sharpening = g_sharpening;
+        apply_image();
+        break;
+    case Command::reset_image: {
+        const enhanced::Settings defaults = enhanced::defaults();
+        enhanced::settings().image_filter = defaults.image_filter;
+        enhanced::settings().sharpening = defaults.sharpening;
+        if (!g_image_filter_locked) g_image_filter = defaults.image_filter;
+        if (!g_sharpening_locked) g_sharpening = defaults.sharpening;
+        apply_image();
+        break;
+    }
+    case Command::crt_profile:
+        enhanced::settings().crt_profile = (enhanced::settings().crt_profile + step + 4) % 4;
+        apply_crt();
+        break;
+    case Command::crt_scanline:
+        enhanced::settings().crt_scanline = std::clamp(enhanced::settings().crt_scanline + step * 0.05f, 0.0f, 1.0f);
+        apply_crt();
+        break;
+    case Command::crt_mask:
+        enhanced::settings().crt_mask = std::clamp(enhanced::settings().crt_mask + step * 0.05f, 0.0f, 1.0f);
+        apply_crt();
+        break;
+    case Command::crt_curvature:
+        enhanced::settings().crt_curvature = std::clamp(enhanced::settings().crt_curvature + step * 0.05f, 0.0f, 1.0f);
+        apply_crt();
+        break;
+    case Command::crt_brightness:
+        enhanced::settings().crt_brightness = std::clamp(enhanced::settings().crt_brightness + step * 0.05f, 0.5f, 2.0f);
+        apply_crt();
+        break;
+    case Command::crt_sharpness:
+        enhanced::settings().crt_sharpness = std::clamp(enhanced::settings().crt_sharpness + step * 0.05f, 0.0f, 1.0f);
+        apply_crt();
+        break;
+    case Command::reset_crt: {
+        const enhanced::Settings defaults = enhanced::defaults();
+        enhanced::settings().crt_profile = defaults.crt_profile;
+        enhanced::settings().crt_scanline = defaults.crt_scanline;
+        enhanced::settings().crt_mask = defaults.crt_mask;
+        enhanced::settings().crt_curvature = defaults.crt_curvature;
+        enhanced::settings().crt_brightness = defaults.crt_brightness;
+        enhanced::settings().crt_sharpness = defaults.crt_sharpness;
+        apply_crt();
+        break;
+    }
+    case Command::hud_mode:
+        enhanced::settings().hud_edge_anchored = !enhanced::settings().hud_edge_anchored;
+        ps2::set_hud_layout(enhanced::settings().hud_edge_anchored, enhanced::settings().hud_margin);
+        enhanced::save();
+        break;
+    case Command::hud_margin:
+        enhanced::settings().hud_margin = std::clamp(enhanced::settings().hud_margin + step * 4, 0, 64);
+        ps2::set_hud_layout(enhanced::settings().hud_edge_anchored, enhanced::settings().hud_margin);
+        enhanced::save();
+        break;
+    case Command::reset_hud: {
+        const enhanced::Settings defaults = enhanced::defaults();
+        enhanced::settings().hud_edge_anchored = defaults.hud_edge_anchored;
+        enhanced::settings().hud_margin = defaults.hud_margin;
+        ps2::set_hud_layout(defaults.hud_edge_anchored, defaults.hud_margin);
+        enhanced::save();
+        break;
+    }
+    case Command::restore_defaults: {
+        enhanced::restore_defaults();
+        enhanced::save();
+        const enhanced::Settings &s = enhanced::settings();
+        if (!ps2::g_options.aspect_forced) {
+            ps2::set_aspect(s.aspect);
+            if (ps2::g_options.aspect == ps2::AspectMode::Auto) {
+                int ww = 0, wh = 0; SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
+                if (wh > 0) ps2::resolve_auto_aspect(static_cast<float>(ww) / static_cast<float>(wh));
+            }
+        }
+        g_scale_next = g_scale_locked ? g_scale_now : s.scale;
+        if (!g_look_forced && g_look != s.look) cycle_look(s.look - g_look);
+        g_sharp_next = g_sharp_locked ? g_sharp_now : s.sharp_2d;
+        g_performance_overlay = s.performance_overlay;
+        ps2::set_hud_layout(s.hud_edge_anchored, s.hud_margin);
+        if (!g_image_filter_locked) g_image_filter = s.image_filter;
+        if (!g_sharpening_locked) g_sharpening = s.sharpening;
+        apply_image();
+        apply_crt();
+        const bool full = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) != 0;
+        if (full != s.fullscreen) SDL_SetWindowFullscreen(g_window, s.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+        set_notice("Enhanced settings restored; resolution, 2D filter and VSync apply after restart");
+        break;
+    }
     case Command::change_keys: g_key_note.clear(); break;  // (the menu has switched to its keys page)
     case Command::key_edit: g_key_note.clear(); break;     // (the highlighted line waits for a key now)
     case Command::key_defaults: {
@@ -1153,6 +1356,10 @@ bool menu_pointer_select() {
 bool menu_event(const SDL_Event &e) {
     using quickmenu::Command;
     if (!g_menu.is_open()) {
+        if (e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F10) {
+            open_menu("key F10", true);
+            return true;
+        }
         if (e.type == SDL_KEYDOWN && !e.key.repeat && is_menu_key(e.key.keysym.scancode)) {
             open_menu((std::string("key ") + SDL_GetScancodeName(e.key.keysym.scancode)).c_str());
             return true;
@@ -1160,8 +1367,14 @@ bool menu_event(const SDL_Event &e) {
         if (e.type == SDL_CONTROLLERBUTTONDOWN) {
             SDL_GameController *pad = SDL_GameControllerFromInstanceID(e.cbutton.which);
             const int b = e.cbutton.button;
+            const bool enhanced_chord = pad && ((b == SDL_CONTROLLER_BUTTON_LEFTSTICK && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) ||
+                                                (b == SDL_CONTROLLER_BUTTON_BACK && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK)));
             const bool both = pad && ((b == SDL_CONTROLLER_BUTTON_START && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) ||
                                       (b == SDL_CONTROLLER_BUTTON_BACK && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)));
+            if (enhanced_chord) {
+                open_menu("Select + L3 on the controller", true);
+                return true;
+            }
             if (b == SDL_CONTROLLER_BUTTON_GUIDE || both) {
                 open_menu(b == SDL_CONTROLLER_BUTTON_GUIDE ? "the controller's Guide button" : "Select + Start on the controller");
                 return true;
@@ -1183,11 +1396,17 @@ bool menu_event(const SDL_Event &e) {
     switch (e.type) {
     case SDL_KEYDOWN: {
         const SDL_Scancode k = e.key.keysym.scancode;
+        if (!e.key.repeat && k == SDL_SCANCODE_F10) {
+            close_menu("F10");
+            return true;
+        }
         if (!e.key.repeat && is_menu_key(k)) {
             close_menu("its key");
             return true;
         }
         switch (k) {
+        case SDL_SCANCODE_Q: if (g_menu.enhanced()) { g_menu.section_move(-1); menu_paint(); } break;
+        case SDL_SCANCODE_E: if (g_menu.enhanced()) { g_menu.section_move(1); menu_paint(); } break;
         case SDL_SCANCODE_UP: case SDL_SCANCODE_W: move(-1); break;
         case SDL_SCANCODE_DOWN: case SDL_SCANCODE_S: move(1); break;
         case SDL_SCANCODE_LEFT: case SDL_SCANCODE_A: side(-1); break;
@@ -1200,6 +1419,7 @@ bool menu_event(const SDL_Event &e) {
             break;
         // the program's keys keep working; those that need the game running close the menu first
         case SDL_SCANCODE_F2: if (!e.key.repeat) menu_command(Command::look, 1); break;
+        case SDL_SCANCODE_F3: if (!e.key.repeat) menu_command(Command::performance_overlay, 1); break;
         case SDL_SCANCODE_F5: if (!e.key.repeat) menu_command(Command::save, 1); break;
         case SDL_SCANCODE_F8: if (!e.key.repeat) menu_command(Command::load, 1); break;
         case SDL_SCANCODE_F9:
@@ -1218,6 +1438,8 @@ bool menu_event(const SDL_Event &e) {
     case SDL_KEYUP: return true;
     case SDL_CONTROLLERBUTTONDOWN:
         switch (e.cbutton.button) {
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: if (g_menu.enhanced()) { g_menu.section_move(-1); menu_paint(); } break;
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: if (g_menu.enhanced()) { g_menu.section_move(1); menu_paint(); } break;
         case SDL_CONTROLLER_BUTTON_DPAD_UP: move(-1); break;
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN: move(1); break;
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT: side(-1); break;
@@ -1325,6 +1547,12 @@ void poll() {
             if (is_help_key(e.key.keysym.scancode))
                 show_key_card((std::string("key ") + SDL_GetScancodeName(e.key.keysym.scancode) + " went down").c_str());
             if (e.key.keysym.scancode == SDL_SCANCODE_F2) cycle_look();
+            if (e.key.keysym.scancode == SDL_SCANCODE_F3) {
+                g_performance_overlay = !g_performance_overlay;
+                enhanced::settings().performance_overlay = g_performance_overlay;
+                enhanced::save();
+                menu_paint();
+            }
             if (e.key.keysym.scancode == SDL_SCANCODE_F5) ps2::quick_request(ps2::QuickKey::save);
             else if (e.key.keysym.scancode == SDL_SCANCODE_F8) ps2::quick_request(ps2::QuickKey::load);
             else if (e.key.keysym.scancode == SDL_SCANCODE_F9) ps2::quick_request(ps2::QuickKey::report);
@@ -1371,7 +1599,7 @@ void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
     if (w != g_tex_w || h != g_tex_h) {
         if (g_texture) SDL_DestroyTexture(g_texture);
         g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, static_cast<int>(w), static_cast<int>(h));
-        SDL_RenderSetLogicalSize(g_renderer, static_cast<int>(w), static_cast<int>(w) * (ps2::g_options.widescreen ? 9 : 3) / (ps2::g_options.widescreen ? 16 : 4));
+        SDL_RenderSetLogicalSize(g_renderer, static_cast<int>(w), static_cast<int>(static_cast<float>(w) / ps2::display_aspect()));
         g_tex_w = w;
         g_tex_h = h;
     }
@@ -1380,6 +1608,7 @@ void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
     SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
     draw_menu_sdl();
     SDL_RenderPresent(g_renderer);
+    ++g_sdl_presented;
 }
 
 void present() {
@@ -1524,23 +1753,40 @@ double resident_mb() {
 }
 
 void show_speed() {
-    static std::uint64_t start = 0, frames = 0;
+    static std::uint64_t start = 0, frames = 0, presented_start = 0, simulation_start = 0;
     static double cpu_start = 0.0, gpu_start = 0.0;
     const std::uint64_t now = SDL_GetPerformanceCounter();
     if (!start) {
         start = now;
         cpu_start = process_cpu_seconds();
         gpu_start = ps2::gpu_busy_ms();
+#ifdef PS2_GPU
+        presented_start = g_gpu_present ? ps2::gs::gpu::presented_frames() : g_sdl_presented.load();
+#else
+        presented_start = g_sdl_presented.load();
+#endif
+        simulation_start = ps2::frames_run();
     }
     ++frames;
     const double seconds = static_cast<double>(now - start) / static_cast<double>(SDL_GetPerformanceFrequency());
     if (seconds < 1.0) return;
     const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms();
+    const std::uint64_t presented_now =
+#ifdef PS2_GPU
+        g_gpu_present ? ps2::gs::gpu::presented_frames() :
+#endif
+        g_sdl_presented.load();
+    const std::uint64_t presented = presented_now - presented_start;
+    const std::uint64_t simulated = ps2::frames_run() - simulation_start;
+    g_presented_fps = static_cast<double>(presented) / seconds;
+    g_frame_time_ms = presented ? seconds * 1000.0 / static_cast<double>(presented) : 0.0;
+    g_simulation_fps = static_cast<double>(simulated) / seconds;
+    g_game_speed = g_simulation_fps / (ps2::g_options.pal ? 50.0 : 60.0);
     char title[192];
     const double queued = queued_ms();
     char stretched[40] = "";  // "audio 62 ms" is the game's sound waiting; when it is played slower, by how much
     if (g_pipe && g_pipe->tempo() < 0.995) std::snprintf(stretched, sizeof stretched, ", stretched x%.1f", 1.0 / g_pipe->tempo());
-    std::snprintf(title, sizeof title, "ps2-native-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms%s", static_cast<double>(frames) / seconds,
+    std::snprintf(title, sizeof title, "ps2-native-recomp  %.1f presented fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms%s", g_presented_fps,
                   (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued, stretched);
     g_speed_title = title;
     refresh_title();
@@ -1548,6 +1794,9 @@ void show_speed() {
     frames = 0;
     cpu_start = cpu;
     gpu_start = gpu;
+    presented_start = presented_now;
+    simulation_start = ps2::frames_run();
+    if (g_performance_overlay || (g_menu.is_open() && g_menu.enhanced())) menu_paint(false);
 }
 
 // PS2_PRESENT_LOG=1: once a second, how long the emulation thread waited per frame for the window thread (post_present: the
@@ -1842,12 +2091,18 @@ bool open_window(bool fullscreen) {
         if (!g_look_forced) std::fprintf(stderr, "[video] PS2_LOOK=%s is not crisp, crisp_edges, soft, soft_edges, sharp, sharp_edges or 0 to 5, ignored\n", word.c_str());
     }
     load_keys();
+    if (!g_look_forced) {
+        g_look = std::clamp(enhanced::settings().look, 0, keymap::kLookCount - 1);
+        g_keys.look = g_look;
+        ps2::set_video_options(static_cast<std::uint32_t>(g_look));
+    }
     // The inner resolution: PS2_SCALE when it is set, else the 'scale' line of keys.ini (the quick menu writes it), else 1. It is read
     // when the graphics start (run_window, after this), so setting it here is in time.
     g_scale_locked = !ps2::os::env("PS2_SCALE").empty();
-    if (!g_scale_locked && g_keys.scale >= 1 && g_keys.scale <= 4) {
-        ps2::os::set_env("PS2_SCALE", std::to_string(g_keys.scale));
-        std::fprintf(stderr, "[video] resolution %dx from %s (scale = %d)\n", g_keys.scale, g_keys_path.c_str(), g_keys.scale);
+    if (!g_scale_locked) {
+        const int scale = std::clamp(enhanced::settings().scale, 1, 4);
+        ps2::os::set_env("PS2_SCALE", std::to_string(scale));
+        std::fprintf(stderr, "[video] resolution %dx from %s\n", scale, enhanced::settings_path().c_str());
     }
     // The picture pace (ps2/pace.hpp): the 'pace' line of keys.ini, unless PS2_PACE is set. The runtime reads it at boot, after this.
     if (!g_keys.pace.empty() && ps2::os::env("PS2_PACE").empty()) {
@@ -1855,19 +2110,48 @@ bool open_window(bool fullscreen) {
         ps2::os::set_env("PS2_PACE_FROM", g_keys_path);
     }
     g_scale_now = std::clamp(std::atoi(ps2::os::env("PS2_SCALE").c_str()), 1, 4);
-    g_scale_next = g_scale_locked ? g_scale_now : (g_keys.scale >= 1 ? g_keys.scale : g_scale_now);
+    g_scale_next = g_scale_locked ? g_scale_now : enhanced::settings().scale;
     // the 2D art filter the same way: PS2_SHARP_2D, else the 'sharp_2d' line of keys.ini, else sharp (gpu.cpp reads it at its start)
     g_sharp_locked = !ps2::os::env("PS2_SHARP_2D").empty();
-    if (!g_sharp_locked && g_keys.sharp_2d >= 0) ps2::os::set_env("PS2_SHARP_2D", std::to_string(g_keys.sharp_2d));
+    if (!g_sharp_locked) ps2::os::set_env("PS2_SHARP_2D", std::to_string(enhanced::settings().sharp_2d));
     g_sharp_now = ps2::os::env("PS2_SHARP_2D").empty() ? 1 : std::clamp(std::atoi(ps2::os::env("PS2_SHARP_2D").c_str()), 0, 2);
-    g_sharp_next = g_sharp_locked ? g_sharp_now : (g_keys.sharp_2d >= 0 ? g_keys.sharp_2d : g_sharp_now);
+    g_sharp_next = g_sharp_locked ? g_sharp_now : enhanced::settings().sharp_2d;
+    g_image_filter = enhanced::settings().image_filter;
+    if (const std::string filter = ps2::os::env("PS2_IMAGE_FILTER"); !filter.empty()) {
+        if (filter == "original" || filter == "0") g_image_filter = 0, g_image_filter_locked = true;
+        else if (filter == "cas" || filter == "1") g_image_filter = 1, g_image_filter_locked = true;
+        else std::fprintf(stderr, "[video] PS2_IMAGE_FILTER=%s is invalid (use original or cas); saved setting retained\n", filter.c_str());
+    }
+    g_sharpening = enhanced::settings().sharpening;
+    if (const std::string strength = ps2::os::env("PS2_SHARPENING"); !strength.empty()) {
+        char *end = nullptr;
+        const float percent = std::strtof(strength.c_str(), &end);
+        if (end && end != strength.c_str() && *end == '\0' && percent >= 0.0f && percent <= 100.0f)
+            g_sharpening = percent / 100.0f, g_sharpening_locked = true;
+        else
+            std::fprintf(stderr, "[video] PS2_SHARPENING=%s is invalid (use 0..100); saved setting retained\n", strength.c_str());
+    }
+    std::fprintf(stderr, "[video] image filter %s, sharpening %.0f%%%s%s\n",
+                 ps2::gs::gpu::image_filter_name(static_cast<ps2::gs::gpu::ImageFilter>(g_image_filter)), g_sharpening * 100.0f,
+                 g_image_filter_locked ? " (filter forced)" : "", g_sharpening_locked ? " (strength forced)" : "");
+    g_vsync_locked = !ps2::os::env("PS2_PRESENT_MODE").empty();
+    if (!g_vsync_locked) ps2::os::set_env("PS2_PRESENT_MODE", enhanced::settings().vsync ? "fifo" : "immediate");
+    g_performance_overlay = enhanced::settings().performance_overlay;
+    ps2::set_hud_layout(enhanced::settings().hud_edge_anchored, enhanced::settings().hud_margin);
     Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u);
 #ifdef __APPLE__
     if (!std::getenv("PS2_SDL_RENDERER")) flags |= SDL_WINDOW_METAL;
 #endif
     g_game_title = ps2::os::env("PS2_WINDOW_TITLE");
     const std::string initial_title = g_game_title.empty() ? g_speed_title : g_game_title + "   |   " + g_speed_title;
-    g_window = SDL_CreateWindow(initial_title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, ps2::g_options.widescreen ? 1280 : 960, 720, flags);
+    if (ps2::g_options.aspect == ps2::AspectMode::Auto) {
+        SDL_DisplayMode desktop{};
+        if (SDL_GetCurrentDisplayMode(0, &desktop) == 0 && desktop.h > 0)
+            ps2::resolve_auto_aspect(static_cast<float>(desktop.w) / static_cast<float>(desktop.h));
+    }
+    const int initial_h = 720;
+    const int initial_w = static_cast<int>(initial_h * ps2::display_aspect());
+    g_window = SDL_CreateWindow(initial_title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, initial_w, initial_h, flags);
     if (!g_window) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return false;
@@ -2038,6 +2322,14 @@ int run_window(const std::function<int()> &emulate) {
     ps2::init_graphics();
     g_gpu_present = attach_gpu();
     std::fprintf(stderr, "[window] %s\n", g_gpu_present ? "presenting through WebGPU" : "presenting through SDL");
+#ifdef PS2_GPU
+    if (g_gpu_present) {
+        const enhanced::Settings &s = enhanced::settings();
+        ps2::gs::gpu::set_crt_settings({static_cast<ps2::gs::gpu::CrtProfile>(s.crt_profile), s.crt_scanline, s.crt_mask,
+                                        s.crt_curvature, s.crt_brightness, s.crt_sharpness});
+        ps2::gs::gpu::set_image_settings({static_cast<ps2::gs::gpu::ImageFilter>(g_image_filter), g_sharpening});
+    }
+#endif
     if (!g_gpu_present && !create_renderer()) return 1;
     const bool threads = !std::getenv("PS2_ONE_THREAD") && !std::getenv("PS2_TIME") && ps2::g_options.frames_dir.empty();
     if (!threads) {

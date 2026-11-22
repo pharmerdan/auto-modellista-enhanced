@@ -9,6 +9,7 @@
 
 #include "big_stack_thread.hpp"
 #ifdef PS2_WINDOW
+#include "enhanced_settings.hpp"
 #include "window.hpp"
 #endif
 #ifdef PS2_PROFILE
@@ -114,7 +115,8 @@ int usage() {
                  "              [--disc image.iso] [--memcard card.ps2] [--pal | --ntsc] [--trace-syscalls] [--trace-io] [--trace-threads]\n"
                  "              [--trace-iop] [--trace-iop-hle] [--frames-dir dir] [--frame-every n] [--frame-at n]...\n"
                  "              [--press frame:button[+button][:frames]]... [--window] [--fullscreen]\n"
-                 "              [--save-state frame:file] [--load-state file|newest] [--quick-dir dir] [--widescreen] [--patches file]\n"
+                 "              [--save-state frame:file] [--load-state file|newest] [--quick-dir dir] [--aspect auto|4:3|16:9|16:10|21:9|32:9] [--patches file]\n"
+                 "              [--image-filter original|cas] [--sharpening 0..100]\n"
                  "              [--record file] [--no-record] [--replay file [--replay-continue]] [--rtc seconds] [--game-dir dir]\n");
     return 2;
 }
@@ -664,6 +666,20 @@ int main(int argc, char **argv) {
     ps2::crash::enter_thread(ps2::crash::Thread::Main);
     // PS2_CRASH_TEST=<thread>:<kind>[:<frame>]: a failure on purpose to look at the crash lines, off unless set (ps2/crash.hpp)
     ps2::crash::test_parse(ps2::os::env("PS2_CRASH_TEST").c_str());
+#ifdef PS2_WINDOW
+    enhanced::load();
+    ps2::set_aspect(enhanced::settings().aspect);
+    ps2::set_hud_layout(enhanced::settings().hud_edge_anchored, enhanced::settings().hud_margin);
+    ps2::g_options.pillarbox_2d = true;
+#endif
+    if (const std::string aspect = ps2::os::env("PS2_ASPECT"); !aspect.empty()) {
+        if (!ps2::set_aspect(aspect)) {
+            std::fprintf(stderr, "[video] PS2_ASPECT=%s is invalid (use auto, 4:3, 16:9, 16:10, 21:9 or 32:9)\n", aspect.c_str());
+            return usage();
+        }
+        ps2::g_options.pillarbox_2d = true;
+        ps2::g_options.aspect_forced = true;
+    }
 #ifdef _WIN32
     // The runtime uses short SDL/condition-variable waits; request 1 ms timer granularity for Windows pacing.
     timeBeginPeriod(1);
@@ -743,7 +759,15 @@ int main(int argc, char **argv) {
     std::atexit([] { ps2::flush_memory_card(); });
 #endif
     std::vector<std::string> args{from_disc ? std::string() : std::string(argv[1])};
-    [[maybe_unused]] bool window = false, fullscreen = false;
+    [[maybe_unused]] bool window = false, fullscreen =
+#ifdef PS2_WINDOW
+        enhanced::settings().fullscreen;
+#else
+        false;
+#endif
+#ifdef PS2_WINDOW
+    if (const std::string full = ps2::os::env("PS2_FULLSCREEN"); !full.empty()) fullscreen = full != "0" && full != "off";
+#endif
     std::string load_path, given_game_dir;
     bool no_record = false;
     ps2::g_options.disc_program = from_disc;
@@ -761,7 +785,30 @@ int main(int argc, char **argv) {
         }
         else if (a == "--misses" && i + 1 < argc) ps2::g_options.misses_path = argv[++i];
         else if (a == "--trace-syscalls") ps2::g_options.trace_syscalls = true;
-        else if (a == "--widescreen") ps2::g_options.widescreen = true;
+        else if (a == "--widescreen") {
+            ps2::set_aspect("16:9");
+            ps2::g_options.pillarbox_2d = true;
+            ps2::g_options.aspect_forced = true;
+        }
+        else if (a == "--aspect" && i + 1 < argc) {
+            if (!ps2::set_aspect(argv[++i])) return usage();
+            ps2::g_options.pillarbox_2d = true;
+            ps2::g_options.aspect_forced = true;
+        }
+#ifdef PS2_WINDOW
+        else if (a == "--image-filter" && i + 1 < argc) {
+            const std::string value = argv[++i];
+            if (value != "original" && value != "cas") return usage();
+            ps2::os::set_env("PS2_IMAGE_FILTER", value);
+        }
+        else if (a == "--sharpening" && i + 1 < argc) {
+            const std::string value = argv[++i];
+            char *end = nullptr;
+            const float percent = std::strtof(value.c_str(), &end);
+            if (!end || end == value.c_str() || *end != '\0' || percent < 0.0f || percent > 100.0f) return usage();
+            ps2::os::set_env("PS2_SHARPENING", value);
+        }
+#endif
         else if (a == "--language" && i + 1 < argc) {
             // the language the console is set to, which multi-language discs (Urban Reign PAL: en fr de es it) show their text in
             ps2::g_options.language = language_number(argv[++i]);
@@ -790,7 +837,7 @@ int main(int argc, char **argv) {
             ps2::g_options.axis_presses.push_back(press);
         }
 #ifdef PS2_WINDOW
-        else if (a == "--window") window = true;
+        else if (a == "--window") window = true, fullscreen = false;
         else if (a == "--fullscreen") window = fullscreen = true;
 #endif
         else if (a == "--frame-every" && i + 1 < argc) ps2::g_options.frame_every = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));

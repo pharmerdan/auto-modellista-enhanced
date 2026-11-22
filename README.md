@@ -1,4 +1,108 @@
-# ps2-native-recomp
+# Auto Modellista Enhanced
+
+Auto Modellista Enhanced is an experimental Apple Silicon version of the PAL
+PlayStation 2 release of *Auto Modellista*, built on a native PS2 static
+recompiler. It keeps the original game and its timing intact while adding a
+native macOS presentation and settings layer. This repository contains source
+code only: it does not contain the game, extracted executables, generated game
+code, saves, screenshots, or other Capcom assets.
+
+The current macOS work includes:
+
+- an F10 controller-friendly frontend with persistent display, graphics,
+  performance, control, save, and general settings;
+- live 4:3, 16:9, 16:10, 21:9, and experimental 32:9 presentation, with
+  Auto Modellista-specific 3D projection, 2D/HUD, scissor, and car-shadow
+  handling;
+- optional single-pass CRT-Lottes Fast, CRT-Lottes, and CRT-Hyllian profiles;
+- optional AMD FidelityFX Contrast Adaptive Sharpening (CAS), plus the
+  upstream picture styles and resolution scaling;
+- an F3 performance overlay, game-specific F1 key card, fullscreen and
+  controller navigation; and
+- the upstream quick-save and memory-card implementation, including guarded
+  card writes and backups.
+
+## Upstream and attribution
+
+This project is a development branch of
+[exoteric33/ps2-native-recomp](https://github.com/exoteric33/ps2-native-recomp),
+which turns a user-owned PS2 disc into a native program through static
+recompilation. That project is itself built on
+[Samir Nuri's ps2-web-recomp](https://github.com/snuri00/ps2-web-recomp).
+The original MIT copyright notices are preserved in [LICENSE](LICENSE), and
+the MPEG decoder's BSD notice is preserved in
+[runtime/src/ipu/NOTICE](runtime/src/ipu/NOTICE). The F10 frontend design was
+also informed by the MIT-licensed
+[apexJCL/automodellista-recomp](https://github.com/apexJCL/automodellista-recomp);
+no game assets or Xbox-specific code are included here.
+
+## Building on Apple Silicon
+
+You need an Apple Silicon Mac with Xcode Command Line Tools, Git, CMake,
+Ninja, Python 3, SDL2 development files, and Bash 4 or newer. One Homebrew
+setup is:
+
+```sh
+brew install bash cmake ninja python sdl2
+```
+
+Prepare the recompiler and download the pinned wgpu-native dependency:
+
+```sh
+brew --prefix bash >/dev/null
+"$(brew --prefix)/bin/bash" scripts/setup.sh --native-only
+```
+
+Then create an image from a PS2 disc that you own and run the upstream porting
+workflow. The generated code, extracted executable, disc image, native build,
+memory card, and save states remain local and are ignored by Git:
+
+```sh
+"$(brew --prefix)/bin/bash" scripts/port.sh automodellista-pal "/path/to/your/Auto Modellista.iso" --native-only
+```
+
+For development builds against an already generated local tree:
+
+```sh
+cmake -S . -B build/native-automodellista-enhanced -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+  -DPS2_GENERATED="$PWD/generated/automodellista-pal"
+cmake --build build/native-automodellista-enhanced --target ps2run
+ctest --test-dir build/native-automodellista-enhanced --output-on-failure
+```
+
+See [the enhanced frontend notes](docs/automodellista-enhanced-frontend.md),
+[multi-aspect implementation](docs/automodellista-multiaspect.md),
+[CRT implementation](docs/automodellista-phase2c.md), and
+[CAS implementation](docs/automodellista-phase2e.md) for controls, diagnostic
+options, and manual validation checklists.
+
+## Game ownership and distribution
+
+You must supply an image made from your own game disc. Do not commit or share
+disc images, extracted or patched game executables, generated C++, native game
+binaries, screenshots, recordings, save data, or memory captures. Those files
+are intentionally excluded by `.gitignore` and are not part of this source
+repository.
+
+## Status, limitations, and Windows plans
+
+- The game-specific enhancements currently target the PAL executable
+  `SLES-51191`; other regions are not supported by the projection and HUD
+  classifiers.
+- 21:9 still needs broader camera/culling validation and 32:9 is experimental.
+- Automated tests cover configuration, classifiers, shaders, and menu logic,
+  but do not replace visual and gameplay testing on a real Metal display.
+- The upstream recompiler remains early software and may have performance,
+  graphics, sound, timing, or compatibility problems.
+- The current enhanced build is developed and tested for Apple Silicon. A
+  Windows port is planned after the macOS implementation and manual validation
+  are stable; the upstream runtime already supports Windows, but the enhanced
+  frontend and renderer combinations are not yet claimed as validated there.
+
+---
+
+## Upstream ps2-native-recomp documentation
 
 Turns a PS2 game disc you own into a native Windows or Linux program by static recompilation: the code of the PS2's
 main processor is translated to C++ and compiled, and the rest of the console is emulated. 55 games work as far as they
