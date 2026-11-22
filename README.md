@@ -172,3 +172,41 @@ other game publisher.
 
 ### Enhanced Menu — Graphics
 ![Graphics Settings](docs/screenshots/enhanced-menu-graphics.png)
+
+### AI Development Contributors
+
+**OpenAI ChatGPT**
+- Project architecture and development planning
+- Feature design and implementation guidance
+- Debugging strategy and testing workflows
+
+**OpenAI Codex**
+- C++ implementation and debugging
+- PS2 widescreen and HUD enhancements
+- CRT shaders, CAS sharpening and graphics frontend
+- Build automation and regression testing
+
+**Project direction, integration and gameplay validation:** [@pharmerdan](https://github.com/pharmerdan)
+
+Developed with AI assistance using [ChatGPT](https://chatgpt.com) and [OpenAI Codex](https://github.com/openai/codex).
+
+This is an independent community project, not an official OpenAI product.
+
+### AI Development Contributors
+
+**OpenAI ChatGPT**
+- Project architecture and development planning
+- Feature design and implementation guidance
+- Debugging strategy and testing workflows
+
+**OpenAI Codex**
+- C++ implementation and debugging
+- PS2 widescreen and HUD enhancements
+- CRT shaders, CAS sharpening and graphics frontend
+- Build automation and regression testing
+
+**Project direction, integration and gameplay validation:** [@pharmerdan](https://github.com/pharmerdan)
+
+Developed with AI assistance using [ChatGPT](https://chatgpt.com) and [OpenAI Codex](https://github.com/openai/codex).
+
+This is an independent community project, not an official OpenAI product.
