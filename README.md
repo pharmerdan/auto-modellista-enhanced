@@ -34,14 +34,21 @@ throughout the game.
 
 ## Screenshots
 
-Screenshots will be added after representative captures have been selected.
+### Title Screen and Car Selection
 
-| View | Status |
-| --- | --- |
-| Gameplay | Screenshot placeholder |
-| Enhanced graphics menu | Screenshot placeholder |
-| CRT effects | Screenshot placeholder |
-| Corrected and edge-anchored HUD | Screenshot placeholder |
+| Title Screen | Car Selection |
+|:---:|:---:|
+| ![Title Screen](docs/screenshots/title-screen.png) | ![Car Selection](docs/screenshots/car-select.png) |
+
+### 16:10 Widescreen Gameplay with CRT Effects
+
+![Auto Modellista Enhanced — 16:10 CRT gameplay](docs/screenshots/gameplay-crt-16-10.png)
+
+### Enhanced Graphics Frontend
+
+| Display and HUD Settings | Graphics and CRT Settings |
+|:---:|:---:|
+| ![Enhanced Display Menu](docs/screenshots/enhanced-menu-display.png) | ![Enhanced Graphics Menu](docs/screenshots/enhanced-menu-graphics.png) |
 
 ## Installation and requirements
 
