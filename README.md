@@ -84,11 +84,14 @@ cmake --build build/native-automodellista-enhanced --target ps2run
 ctest --test-dir build/native-automodellista-enhanced --output-on-failure
 ```
 
-Launch **Auto Modellista Enhanced** with persistent PS2 memory-card support:
+### Virtual PS2 Memory Cards
 
-```bash
-cd ~/Projects/ps2-native-recomp
+Launch the game with the `--memcard` argument to provide a persistent virtual
+PS2 memory card. The following macOS Terminal commands create a dedicated
+storage directory outside the game installation and launch the generated PAL
+build with memory-card support enabled:
 
+```sh
 mkdir -p "$HOME/Library/Application Support/AutoModellistaEnhanced"
 
 ./build/native-automodellista-speedometer/ps2run \
@@ -100,11 +103,88 @@ mkdir -p "$HOME/Library/Application Support/AutoModellistaEnhanced"
   --no-record
 ```
 
-The game loads saved graphics, CRT, CAS, aspect-ratio and HUD preferences.
+Memory-card data persists between sessions when you reuse the same memory-card
+path. Do not overwrite an existing save file; choose a new path if you need a
+separate card. Keeping the virtual card in the Application Support directory,
+as shown above, stores it outside the game installation directory. Users must
+provide their own legally obtained PAL game files.
 
-**Memory cards:** Always reuse the same memory-card path to preserve progress. In-game memory-card saves are separate from F5/F8 save states.
+Virtual PS2 memory cards contain normal in-game saves and are separate from the
+F5/F8 quick save states. For other normal launch commands, enable persistent
+memory-card support by adding `--memcard "/path/to/memcard.ps2"` and continuing
+to use that same path on future launches.
 
-**Shortcuts:** F10 opens Enhanced settings, F3 shows performance statistics, and F11 toggles fullscreen.
+### Native macOS application (Phase 2D.1)
+
+A local, Finder-launchable Apple Silicon application is available.
+It bundles the native ARM64 game executable, SDL2-compat, SDL3 and
+a custom Silverstone Metallic Honda S2000 application icon.
+
+This is a local development package, not a public binary release.
+You must first prepare the PAL game files and compile the enhanced
+native executable in your own project checkout.
+
+The packaging script requires:
+
+- `build/native-automodellista-speedometer/ps2run`
+- `games/automodellista-pal-ws/patched/SLES_511.91`
+- `games/automodellista-pal-ws/disc.iso`
+- `assets/macos/AutoModellistaEnhanced.icns`
+- Xcode Command Line Tools and installed SDL2-compat/SDL3 libraries
+
+From the repository root, create a test application:
+
+```sh
+./scripts/package_macos_local_app.sh
+```
+
+The default output is:
+
+`~/Applications/Auto Modellista Enhanced (Package Test).app`
+
+The script refuses to overwrite an existing application.
+
+For a permanent-named application, use a separate staging folder:
+
+```sh
+mkdir -p "$HOME/Applications/AME-Ready"
+
+AME_PACKAGE_OUTPUT="$HOME/Applications/AME-Ready/Auto Modellista Enhanced.app" \
+  ./scripts/package_macos_local_app.sh
+
+open "$HOME/Applications/AME-Ready/Auto Modellista Enhanced.app"
+```
+
+Test the game, controller, F10 settings, F11 fullscreen and normal
+in-game saving before installing the application.
+
+To install, first preserve any existing
+`/Applications/Auto Modellista Enhanced.app` as a backup, then copy
+the validated permanent-named application into `/Applications`
+using Finder. Administrator authentication may be required.
+
+The application reads the PAL game files from the original project
+directory, whose absolute path is recorded at packaging time.
+Moving the `.app` into `/Applications` does not move those files.
+
+The virtual PS2 memory card remains at:
+
+`~/Library/Application Support/AutoModellistaEnhanced/memcard.ps2`
+
+Existing Enhanced graphics preferences and save-state data remain
+in their previously configured locations. Packaging does not
+overwrite or reset them.
+
+After compiling a newer native executable, rerun the packaging
+script with a new output location to create an updated app.
+
+**Distribution limitation:** This local build is not portable to
+other users. It depends on locally prepared game files and an
+embedded developer checkout path. The application bundles the native `ps2run` executable, which may
+contain compiled game-derived code, but not the original PAL ISO or
+PS2 ELF. Do not distribute this local binary build without reviewing
+redistribution rights. A future public release requires a separate
+user-provided game preparation workflow.
 
 The generated code, extracted executable, disc image, native build, memory card,
 and save states remain local and are ignored by Git. Never commit or distribute
@@ -116,7 +196,7 @@ For controls and contributor validation notes, see the
 
 ## Development roadmap
 
-- Standalone macOS application
+- Public macOS release with user-provided PAL game import (local native app completed)
 - Windows x64 release
 - Additional compatibility improvements
 - Optional graphics renderer optimisation
@@ -136,6 +216,25 @@ OpenAI sponsors, endorses, or maintains the project.
 The enhanced frontend design was also informed by the MIT-licensed
 [apexJCL/automodellista-recomp](https://github.com/apexJCL/automodellista-recomp).
 No Xbox-specific code or game assets from that project are included here.
+
+### AI Development Contributors
+
+**OpenAI ChatGPT**
+- Project architecture and development planning
+- Feature design and implementation guidance
+- Debugging strategy and testing workflows
+
+**OpenAI Codex**
+- C++ implementation and debugging
+- PS2 widescreen and HUD enhancements
+- CRT shaders, CAS sharpening and graphics frontend
+- Build automation and regression testing
+
+**Project direction, integration and gameplay validation:** [@pharmerdan](https://github.com/pharmerdan)
+
+Developed with AI assistance using [ChatGPT](https://chatgpt.com) and [OpenAI Codex](https://github.com/openai/codex).
+
+This is an independent community project, not an official OpenAI product.
 
 ## Upstream acknowledgement
 
@@ -168,20 +267,3 @@ PlayStation and PS2 are trademarks of Sony Interactive Entertainment. *Auto
 Modellista* and other game names are trademarks of their respective owners.
 This project is not affiliated with or endorsed by Sony, Capcom, OpenAI, or any
 other game publisher.
-
-## Screenshots
-
-### Title Screen
-![Title Screen](docs/screenshots/title-screen.png)
-
-### Car Selection
-![Car Selection](docs/screenshots/car-select.png)
-
-### 16:10 Gameplay with CRT Effects
-![16:10 CRT Gameplay](docs/screenshots/gameplay-crt-16-10.png)
-
-### Enhanced Menu — Display
-![Display Settings](docs/screenshots/enhanced-menu-display.png)
-
-### Enhanced Menu — Graphics
-![Graphics Settings](docs/screenshots/enhanced-menu-graphics.png)
