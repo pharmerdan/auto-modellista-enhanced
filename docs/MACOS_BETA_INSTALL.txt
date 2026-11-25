@@ -1,0 +1,69 @@
+AUTO MODELLISTA ENHANCED — v1.0.0-beta.1
+Apple Silicon macOS public beta
+
+An unofficial native Apple Silicon recompilation
+launcher for Auto Modellista (PlayStation 2).
+
+This beta is distributed without game data.
+
+SUPPORTED GAME
+Auto Modellista PAL
+SLES-51191
+CRC: 692C87AD
+
+INSTALLATION
+
+1. Install Apple's Command Line Tools if needed:
+
+   xcode-select --install
+
+2. Install Homebrew if needed:
+   https://brew.sh
+
+3. Install required dependencies:
+
+   brew install bash cmake ninja sdl2-compat sdl3
+
+4. Drag Auto Modellista Enhanced.app to Applications.
+
+5. Open the application.
+
+   This beta is not Apple-notarized.
+
+   If macOS blocks it, use System Settings >
+   Privacy & Security > Open Anyway after attempting
+   to launch the application.
+
+   Do not disable Gatekeeper globally.
+
+6. Select your own supported PAL ISO.
+
+7. Click Prepare Game.
+
+   The application will generate a native ARM64 version
+   locally. Preparation requires disk space and may
+   take several minutes.
+
+8. Click Play.
+
+   Subsequent launches should not require recompilation.
+
+IMPORTANT
+
+- Apple Silicon Mac required.
+- You must provide your own supported game disc image.
+- No game ISO is included.
+- The initial preparation requires compiler tools.
+- Internet access may be needed to install dependencies.
+- This is a beta, not a notarized production release.
+- Clean-Mac compatibility is still being evaluated.
+
+PROJECT
+https://github.com/pharmerdan/auto-modellista-enhanced
+
+CREDITS
+ps2-native-recomp: exoteric33
+ps2-web-recomp: Samir Nuri
+PAL widescreen patch: nemesis2000
+
+Third-party licence notices are provided inside the app.

@@ -1,0 +1,569 @@
+import AppKit
+import CryptoKit
+import Foundation
+
+struct PreparedGame: Codable {
+    let name: String
+}
+
+final class Launcher: NSObject, NSApplicationDelegate {
+
+    let root: URL = {
+        let path = Bundle.main.object(
+            forInfoDictionaryKey: "AMEProjectRoot"
+        ) as! String
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }()
+
+    let support = URL(
+        fileURLWithPath: NSHomeDirectory()
+    ).appendingPathComponent(
+        "Library/Application Support/AutoModellistaEnhanced/v100-prototype",
+        isDirectory: true
+    )
+
+    let expectedHash =
+        "73a89cdd8d555a7fd3a22d3dd86d79783439cd8356b71e87481c3a30a72c1525"
+
+    var window: NSWindow!
+    var status: NSTextField!
+    var logView: NSTextView!
+    var importButton: NSButton!
+    var prepareButton: NSButton!
+    var playButton: NSButton!
+
+    var selectedISO: URL?
+    var preparedName: String?
+    var activeProcess: Process?
+
+    var recordURL: URL {
+        support.appendingPathComponent("prepared.json")
+    }
+
+    func applicationDidFinishLaunching(
+        _ notification: Notification
+    ) {
+        NSApp.setActivationPolicy(.regular)
+
+        window = NSWindow(
+            contentRect: NSRect(
+                x: 0, y: 0, width: 740, height: 470
+            ),
+            styleMask: [
+                .titled, .closable, .miniaturizable, .resizable
+            ],
+            backing: .buffered,
+            defer: false
+        )
+
+        window.title =
+            "Auto Modellista Enhanced — Import Prototype"
+        window.center()
+
+        let title = NSTextField(
+            labelWithString: "Auto Modellista Enhanced v1.00"
+        )
+        title.font = .boldSystemFont(ofSize: 21)
+
+        let subtitle = NSTextField(
+            labelWithString:
+                "PAL SLES-51191 — Local development prototype"
+        )
+        subtitle.textColor = .secondaryLabelColor
+
+        importButton = NSButton(
+            title: "Import PAL ISO",
+            target: self,
+            action: #selector(importISO)
+        )
+
+        prepareButton = NSButton(
+            title: "Prepare Game",
+            target: self,
+            action: #selector(prepareGame)
+        )
+
+        playButton = NSButton(
+            title: "Play",
+            target: self,
+            action: #selector(playGame)
+        )
+
+        prepareButton.isEnabled = false
+        playButton.isEnabled = false
+
+        let buttons = NSStackView(
+            views: [importButton, prepareButton, playButton]
+        )
+        buttons.orientation = .horizontal
+        buttons.spacing = 12
+
+        status = NSTextField(
+            labelWithString: "Select your PAL game ISO to begin."
+        )
+
+        logView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: 680, height: 270)
+        )
+        logView.isEditable = false
+        logView.font = .monospacedSystemFont(
+            ofSize: 11,
+            weight: .regular
+        )
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.documentView = logView
+
+        let stack = NSStackView(
+            views: [
+                title, subtitle, buttons, status, scroll
+            ]
+        )
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = window.contentView!
+        content.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(
+                equalTo: content.leadingAnchor,
+                constant: 20
+            ),
+            stack.trailingAnchor.constraint(
+                equalTo: content.trailingAnchor,
+                constant: -20
+            ),
+            stack.topAnchor.constraint(
+                equalTo: content.topAnchor,
+                constant: 20
+            ),
+            stack.bottomAnchor.constraint(
+                equalTo: content.bottomAnchor,
+                constant: -20
+            ),
+            scroll.widthAnchor.constraint(
+                equalTo: stack.widthAnchor
+            ),
+            scroll.heightAnchor.constraint(
+                greaterThanOrEqualToConstant: 240
+            )
+        ])
+
+        if let data = try? Data(contentsOf: recordURL),
+           let record = try? JSONDecoder().decode(
+                PreparedGame.self,
+                from: data
+           ),
+           preparedFilesExist(record.name) {
+
+            preparedName = record.name
+            playButton.isEnabled = true
+            status.stringValue =
+                "Previously prepared game ready."
+        }
+
+        append("Launcher prototype started.\n")
+        append("Your existing application and saves are untouched.\n")
+
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(
+        _ sender: NSApplication
+    ) -> Bool {
+        return true
+    }
+
+    func append(_ message: String) {
+        logView.textStorage?.append(
+            NSAttributedString(string: message)
+        )
+        logView.scrollToEndOfDocument(nil)
+    }
+
+    func report(_ message: String) {
+        append("ERROR: \(message)\n")
+
+        let alert = NSAlert()
+        alert.messageText = "Auto Modellista Enhanced"
+        alert.informativeText = message
+        alert.runModal()
+    }
+
+    func preparedFilesExist(_ name: String) -> Bool {
+        let game = root.appendingPathComponent(
+            "games/\(name)"
+        )
+        let bin = root.appendingPathComponent(
+            "build/native-\(name)/ps2run"
+        )
+
+        return FileManager.default.isExecutableFile(
+            atPath: bin.path
+        )
+        && FileManager.default.fileExists(
+            atPath: game.appendingPathComponent(
+                "patched/SLES_511.91"
+            ).path
+        )
+        && FileManager.default.fileExists(
+            atPath: game.appendingPathComponent(
+                "disc.iso"
+            ).path
+        )
+        && FileManager.default.fileExists(
+            atPath: game.appendingPathComponent(
+                "patches.txt"
+            ).path
+        )
+    }
+
+    func extract(
+        _ filename: String,
+        from iso: URL,
+        into destination: URL
+    ) throws {
+
+        let process = Process()
+        process.executableURL = URL(
+            fileURLWithPath: "/usr/bin/python3"
+        )
+        process.arguments = [
+            "-I",
+            root.appendingPathComponent(
+                "scripts/disc.py"
+            ).path,
+            "extract",
+            iso.path,
+            destination.path,
+            filename
+        ]
+
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+
+        try process.run()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let data = output.fileHandleForReading
+                .readDataToEndOfFile()
+
+            let message = String(
+                data: data,
+                encoding: .utf8
+            ) ?? "Disc extraction failed."
+
+            throw NSError(
+                domain: "AutoModellistaImport",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: message
+                ]
+            )
+        }
+    }
+
+    @objc func importISO() {
+
+        let panel = NSOpenPanel()
+        panel.title = "Select Auto Modellista PAL ISO"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK,
+              let iso = panel.url else {
+            return
+        }
+
+        guard iso.pathExtension.lowercased() == "iso" else {
+            report("Please select a PAL ISO file.")
+            return
+        }
+
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+
+        do {
+            try FileManager.default.createDirectory(
+                at: temp,
+                withIntermediateDirectories: true
+            )
+
+            defer {
+                try? FileManager.default.removeItem(
+                    at: temp
+                )
+            }
+
+            try extract(
+                "SYSTEM.CNF",
+                from: iso,
+                into: temp
+            )
+
+            let system = try String(
+                contentsOf: temp.appendingPathComponent(
+                    "SYSTEM.CNF"
+                ),
+                encoding: .utf8
+            )
+
+            guard system.uppercased().contains(
+                "SLES_511.91"
+            ) else {
+                report(
+                    "Unsupported disc. Expected PAL SLES-51191."
+                )
+                return
+            }
+
+            try extract(
+                "SLES_511.91",
+                from: iso,
+                into: temp
+            )
+
+            let elf = try Data(
+                contentsOf: temp.appendingPathComponent(
+                    "SLES_511.91"
+                )
+            )
+
+            let hash = SHA256.hash(data: elf)
+                .map {
+                    String(format: "%02x", $0)
+                }
+                .joined()
+
+            guard hash == expectedHash else {
+                report(
+                    "The PAL executable does not match the verified version."
+                )
+                return
+            }
+
+            selectedISO = iso
+            prepareButton.isEnabled = true
+
+            status.stringValue =
+                "Verified PAL ISO — ready to prepare."
+
+            append("SUPPORTED ISO: \(iso.lastPathComponent)\n")
+            append("Disc: SLES-51191\n")
+            append("SHA-256: \(hash)\n")
+
+        } catch {
+            report(error.localizedDescription)
+        }
+    }
+
+    @objc func prepareGame() {
+
+        guard let iso = selectedISO,
+              activeProcess == nil else {
+            return
+        }
+
+        let suffix = UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .prefix(8)
+            .lowercased()
+
+        let name = "automodellista-v100-ui-" + suffix
+
+        let script = root.appendingPathComponent(
+            "scripts/prepare_automodellista_v100.sh"
+        )
+
+        let process = Process()
+        process.executableURL = URL(
+            fileURLWithPath: "/bin/bash"
+        )
+        process.arguments = [
+            script.path,
+            iso.path,
+            name
+        ]
+        process.currentDirectoryURL = root
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] =
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["PS2_JOBS"] = "4"
+        process.environment = environment
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        importButton.isEnabled = false
+        prepareButton.isEnabled = false
+        playButton.isEnabled = false
+
+        status.stringValue = "Preparing native game..."
+        append("\nStarting game preparation...\n")
+
+        pipe.fileHandleForReading.readabilityHandler = {
+            [weak self] handle in
+
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                return
+            }
+
+            let text = String(
+                decoding: data,
+                as: UTF8.self
+            )
+
+            DispatchQueue.main.async {
+                self?.append(text)
+            }
+        }
+
+        process.terminationHandler = {
+            [weak self] finished in
+
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    return
+                }
+
+                pipe.fileHandleForReading.readabilityHandler = nil
+                self.activeProcess = nil
+
+                self.importButton.isEnabled = true
+                self.prepareButton.isEnabled = true
+
+                if finished.terminationStatus == 0
+                    && self.preparedFilesExist(name) {
+
+                    self.preparedName = name
+                    self.playButton.isEnabled = true
+
+                    do {
+                        try FileManager.default.createDirectory(
+                            at: self.support,
+                            withIntermediateDirectories: true
+                        )
+
+                        let record = PreparedGame(name: name)
+                        let data = try JSONEncoder().encode(
+                            record
+                        )
+
+                        try data.write(
+                            to: self.recordURL,
+                            options: .atomic
+                        )
+
+                        self.status.stringValue =
+                            "Preparation complete — ready to play."
+
+                        self.append("\nGAME READY.\n")
+
+                    } catch {
+                        self.report(error.localizedDescription)
+                    }
+
+                } else {
+                    self.status.stringValue =
+                        "Preparation failed. See log."
+
+                    self.append("\nPreparation failed.\n")
+                }
+            }
+        }
+
+        do {
+            activeProcess = process
+            try process.run()
+
+        } catch {
+            activeProcess = nil
+            importButton.isEnabled = true
+            prepareButton.isEnabled = true
+
+            status.stringValue =
+                "Unable to start preparation."
+
+            report(error.localizedDescription)
+        }
+    }
+
+    @objc func playGame() {
+
+        guard let name = preparedName,
+              preparedFilesExist(name) else {
+            report("Prepared game files are missing.")
+            return
+        }
+
+        let bin = root.appendingPathComponent(
+            "build/native-\(name)/ps2run"
+        )
+
+        let game = root.appendingPathComponent(
+            "games/\(name)"
+        )
+
+        let cardFolder = support.appendingPathComponent(
+            "test-saves"
+        )
+
+        do {
+            try FileManager.default.createDirectory(
+                at: cardFolder,
+                withIntermediateDirectories: true
+            )
+
+            let process = Process()
+            process.executableURL = bin
+            process.currentDirectoryURL = root
+
+            process.arguments = [
+                game.appendingPathComponent(
+                    "patched/SLES_511.91"
+                ).path,
+                "--disc",
+                game.appendingPathComponent(
+                    "disc.iso"
+                ).path,
+                "--game-dir",
+                game.path,
+                "--widescreen",
+                "--patches",
+                game.appendingPathComponent(
+                    "patches.txt"
+                ).path,
+                "--memcard",
+                cardFolder.appendingPathComponent(
+                    "memcard.ps2"
+                ).path,
+                "--window",
+                "--no-record"
+            ]
+
+            try process.run()
+            append("Game launched: \(name)\n")
+
+        } catch {
+            report(error.localizedDescription)
+        }
+    }
+}
+
+let application = NSApplication.shared
+let launcher = Launcher()
+
+application.delegate = launcher
+application.run()

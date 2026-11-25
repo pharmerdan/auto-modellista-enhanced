@@ -1,0 +1,29 @@
+AUTO MODELLISTA ENHANCED — THIRD-PARTY ATTRIBUTIONS
+
+Native recompilation framework:
+ps2-native-recomp by exoteric33
+https://github.com/exoteric33/ps2-native-recomp
+
+Original recompilation project:
+ps2-web-recomp by Samir Nuri
+
+Graphics:
+wgpu-native by the gfx-rs contributors
+https://github.com/gfx-rs/wgpu-native
+
+Windowing, input and audio:
+SDL2-compat and SDL3 by the SDL contributors
+https://github.com/libsdl-org
+
+PAL widescreen patch:
+nemesis2000
+Redistributed with permission confirmed by the project maintainer.
+
+Auto Modellista and associated intellectual property
+belong to their respective rights holders.
+
+This project is unofficial and is not affiliated with,
+endorsed by or sponsored by Capcom or Sony.
+
+The application does not include the original game disc
+image or precompiled game-derived code.
